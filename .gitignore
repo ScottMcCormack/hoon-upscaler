@@ -43,3 +43,9 @@ Thumbs.db
 # symlinked venvs too (trailing slash only matches real dirs)
 .venv
 venv
+
+# --- local media (kept on disk, never committed) ---
+input/
+masters/
+out/
+!masters/README.md

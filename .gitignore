@@ -1,0 +1,45 @@
+# --- credentials: never commit ---
+*.key
+*.pem
+.env
+.env.*
+runpod.toml
+**/config.toml
+
+# --- media: too large for git ---
+*.mp4
+*.mkv
+*.mov
+*.avi
+*.png
+*.jpg
+*.jpeg
+*.trf
+work/
+out/
+frames_*/
+
+# --- models ---
+models/
+checkpoints/
+*.safetensors
+*.pth
+*.pt
+*.gguf
+
+# --- python ---
+.venv/
+venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# --- os / editor ---
+.DS_Store
+Thumbs.db
+.vscode/
+*.swp
+
+# symlinked venvs too (trailing slash only matches real dirs)
+.venv
+venv

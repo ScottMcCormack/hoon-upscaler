@@ -103,6 +103,13 @@ def camera_path(subj, n):
 
 def main():
     dets = json.load(open(DETS))
+    meta = dets.pop("_meta", None)
+    if meta is None:
+        print(f"    WARNING: {DETS} records no coordinate space; assuming {FW}x{FH}")
+    elif (meta["width"], meta["height"]) != (FW, FH):
+        sys.exit(f"detections are in {meta['width']}x{meta['height']} space but the camera "
+                 f"solve expects STABFIRST ({FW}x{FH}). Re-run detect_car.py against the "
+                 f"STABFIRST-space video.")
     cap = cv2.VideoCapture(SRC)
     n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     sw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))

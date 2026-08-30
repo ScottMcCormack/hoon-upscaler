@@ -19,9 +19,9 @@ MODE="${2:-full}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 if [ "$MODE" = "test" ]; then
-  IN="$HERE/test_15s.mp4";  OUT="$HERE/sr_test_${RES}.mp4";  EXPECT=200
+  IN="$HERE/test_15s.mp4";  OUT="$HERE/sr_test_${RES}.mp4"
 else
-  IN="$HERE/full_169.mp4";  OUT="$HERE/sr_out_${RES}.mp4";   EXPECT=1400
+  IN="$HERE/full_169.mp4";  OUT="$HERE/sr_out_${RES}.mp4"
 fi
 [ -f "$IN" ] || { echo "ERROR: $IN not found - upload it to this directory first"; exit 1; }
 
@@ -83,12 +83,24 @@ time python inference_cli.py "$IN" \
 echo "### result ###"
 if [ ! -f "$OUT" ]; then echo "!! no output produced - inference failed"; exit 1; fi
 ffprobe -v error -select_streams v:0 -show_entries stream=width,height,nb_frames -of csv=p=0 "$OUT"
-N=$(ffprobe -v error -select_streams v:0 -show_entries stream=nb_frames -of csv=p=0 "$OUT")
-if [ "${N:-0}" -lt "$EXPECT" ]; then
-  echo "!! WARNING: only $N frames (expected >=$EXPECT). Inference did not complete."
+# Compare against the input exactly. A slack threshold hid the very failure this
+# check exists for: a run short by 80 frames (>5s) still passed.
+count_frames() {
+  local n
+  n=$(ffprobe -v error -select_streams v:0 -show_entries stream=nb_frames -of csv=p=0 "$1")
+  if ! [ "$n" -eq "$n" ] 2>/dev/null; then
+    n=$(ffprobe -v error -select_streams v:0 -count_packets \
+        -show_entries stream=nb_read_packets -of csv=p=0 "$1")
+  fi
+  echo "${n:-0}"
+}
+IN_N=$(count_frames "$IN")
+OUT_N=$(count_frames "$OUT")
+if [ "$OUT_N" -ne "$IN_N" ]; then
+  echo "!! frame count mismatch: input $IN_N, output $OUT_N. Inference did not complete."
   exit 1
 fi
-echo "frame check OK: $N frames"
+echo "frame check OK: $OUT_N frames, matching input"
 ls -lh "$OUT"
 echo
 echo "Download $(basename "$OUT") — then TERMINATE the pod (not just stop it)."

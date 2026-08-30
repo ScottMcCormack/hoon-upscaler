@@ -58,14 +58,31 @@ from pathlib import Path
 w = Path(os.environ["WORKDIR"])
 pts = [float(x) for x in w.joinpath("pts.txt").read_text().split() if x.strip()]
 fr = sorted(w.glob("f_*.png"))
-n = min(len(fr), len(pts) - 1)
-out = []
-for i in range(n):
+
+# A crashed inference run produces a plausible, shorter file. Taking min() here would
+# quietly turn that into a shorter deliverable, which is exactly the failure this
+# pipeline is supposed to catch.
+if len(fr) != len(pts):
+    raise SystemExit(
+        f"!! frame/timestamp mismatch: {len(fr)} restored frames vs {len(pts)} source "
+        f"timestamps. Check the upscale completed before finishing."
+    )
+
+n = len(fr)
+out, durs = [], []
+for i in range(n - 1):
     d = pts[i + 1] - pts[i]
-    out.append(f"file '{fr[i].name}'\nduration {d if d > 0 else 1/15:.6f}")
+    d = d if d > 0 else 1 / 15
+    durs.append(d)
+    out.append(f"file '{fr[i].name}'\nduration {d:.6f}")
+
+# The final frame has no following timestamp, so its duration has to be chosen rather
+# than derived. The median of the real gaps is closer than the nominal 1/15.
+term = sorted(durs)[len(durs) // 2] if durs else 1 / 15
+out.append(f"file '{fr[n-1].name}'\nduration {term:.6f}")
 out.append(f"file '{fr[n-1].name}'")     # concat demuxer wants the last file repeated
 w.joinpath("concat.txt").write_text("\n".join(out) + "\n")
-print(f"    concat {n} frames spanning {pts[n]-pts[0]:.2f}s")
+print(f"    concat {n} frames spanning {pts[-1]-pts[0]+term:.2f}s")
 PY
 
 echo "### [3/5] source-cadence renders"

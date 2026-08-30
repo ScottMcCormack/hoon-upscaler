@@ -47,8 +47,22 @@ pip install opencv-contrib-python-headless numpy ultralytics
 The cu130 index matters on Blackwell cards (RTX 50-series) — stock builds have no
 `sm_120` kernels. On Ampere/Ada, any recent build works.
 
-SeedVR2 itself is a separate checkout:
-<https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler>
+SeedVR2 is a separate project and is not installed by the above. Clone it beside this
+repository:
+
+```bash
+cd ..
+git clone https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler.git SeedVR2
+cd SeedVR2
+
+# Its requirements.txt lists bare "torch" and "torchvision", which would replace the
+# CUDA-matched build installed above with a generic one. Strip them out.
+grep -vE '^(torch|torchvision)([=<>].*)?$' requirements.txt > /tmp/req_noTorch.txt
+pip install -r /tmp/req_noTorch.txt
+```
+
+Model weights download automatically from HuggingFace on first run — nothing to fetch by
+hand. They come from [numz/SeedVR2_comfyUI](https://huggingface.co/numz/SeedVR2_comfyUI).
 
 ## Usage
 
@@ -62,10 +76,13 @@ ffmpeg -i in.mp4 \
 ffmpeg -i stabilised.mp4 -vf "crop=312:176:0:0" -crf 0 cropped.mp4
 ```
 
-**Upscale** with SeedVR2 (locally, or on a rented GPU — see `cloud/`):
+**Upscale** with SeedVR2 (locally, or on a rented GPU — see `cloud/`). `inference_cli.py`
+lives in the SeedVR2 checkout, so run it from there:
 
 ```bash
-python inference_cli.py cropped.mp4 --output raw_upscaled.mp4 \
+cd ../SeedVR2
+python inference_cli.py ../hoon-upscaler/cropped.mp4 \
+  --output ../hoon-upscaler/raw_upscaled.mp4 \
   --dit_model seedvr2_ema_3b_fp16.safetensors \
   --resolution 1080 --batch_size 33 --temporal_overlap 5 \
   --chunk_size 370 --color_correction wavelet --video_backend ffmpeg

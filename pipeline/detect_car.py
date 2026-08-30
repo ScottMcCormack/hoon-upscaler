@@ -12,8 +12,13 @@ import numpy as np
 from ultralytics import YOLO
 
 # usage: detect_car.py [source_video] [detections_out]
-#   defaults match reframe_src.py, so the two compose without arguments
-SRC = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("SRC", "stabilised.mp4")
+#
+# COORDINATE SPACE MATTERS. reframe_src.py solves the camera path in STABFIRST space
+# (1408x1152) and its MAX_JUMP/deadzone constants are in those units. Detecting on the
+# 352x288 stabilised source emits coordinates ~4.5x too small, which reframe_src then
+# maps into the top-left corner of the frame - silently, with a plausible-looking
+# result. Point this at the STABFIRST-space video, not stabilised.mp4.
+SRC = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("SRC", "stabfirst.mp4")
 OUT = sys.argv[2] if len(sys.argv) > 2 else os.environ.get("DETECTIONS", "detections.json")
 
 # COCO classes worth accepting as "the car"
@@ -26,7 +31,10 @@ def main():
 
     dets = {}
     n = 0
+    dims = None
     for r in results:
+        if dims is None:
+            dims = (int(r.orig_shape[1]), int(r.orig_shape[0]))   # (w, h)
         found = []
         for b in r.boxes:
             cls = int(b.cls[0])
@@ -48,6 +56,12 @@ def main():
     sizes = [d["w"] for v in dets.values() for d in v]
     if sizes:
         print(f"detected widths: min {min(sizes):.0f}px  median {np.median(sizes):.0f}px  max {max(sizes):.0f}px")
+
+    # Record the space these coordinates are in so reframe_src.py can refuse a
+    # mismatch instead of silently solving in the wrong one.
+    if dims:
+        dets["_meta"] = {"width": dims[0], "height": dims[1]}
+        print(f"detected in {dims[0]}x{dims[1]} space")
 
     with open(OUT, "w") as f:
         json.dump(dets, f)

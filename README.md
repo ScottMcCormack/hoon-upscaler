@@ -7,6 +7,16 @@ Built for a 2007 Nokia N90 clip (352×288, 15fps VFR, mpeg4 @ 509kbps) of a burn
 Perth speedway. Output is 1080p60. The recipe generalises to other low-resolution phone
 and camcorder footage.
 
+## Before / after
+
+https://github.com/user-attachments/assets/96040f7b-cb6d-46a3-b7f1-a49a5599fa9e
+
+Top: the 312×176 source, nearest-neighbour scaled — no smoothing, so nothing is
+flattered. Bottom: the restored 1080p60 output. Thirty seconds from 0:24.
+
+The lower panel is **reconstructed, not recovered**. See
+[A note on what this produces](#a-note-on-what-this-produces).
+
 ## The pipeline
 
 ```

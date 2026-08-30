@@ -74,7 +74,7 @@ python inference_cli.py cropped.mp4 --output raw_upscaled.mp4 \
 **Finish** — timing, grade and interpolation in one step:
 
 ```bash
-bash pipeline/finish.sh raw_upscaled.mp4 MyClip
+bash pipeline/finish.sh raw_upscaled.mp4 MyClip in.mp4
 ```
 
 Produces `MyClip_lumafix_14fps.mp4`, `_14fps_ungraded.mp4` and `_lumafix_K5.mp4` (60fps).

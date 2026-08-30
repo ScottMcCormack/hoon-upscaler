@@ -13,7 +13,7 @@
 #         bash run_on_pod.sh 720 test       # 15s test first - DO THIS ONE FIRST
 #         bash run_on_pod.sh 1080           # if 720 looks good and you're curious
 # ============================================================================
-set -uo pipefail
+set -euo pipefail
 RES="${1:-720}"
 MODE="${2:-full}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -47,7 +47,9 @@ python -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)" 2
   echo "   e.g. pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124"
   exit 1
 }
-grep -vE '^(torch|torchvision)([=<>].*)?$' requirements.txt > /tmp/req_noTorch.txt
+[ -f requirements.txt ] || { echo "!! requirements.txt missing in $(pwd)"; exit 1; }
+# grep -v exits 1 when it selects nothing, which set -e would treat as fatal
+grep -vE '^(torch|torchvision)([=<>].*)?$' requirements.txt > /tmp/req_noTorch.txt || true
 pip install -q -r /tmp/req_noTorch.txt
 python -c "import torch; print(f'  torch {torch.__version__}  cuda={torch.cuda.is_available()}  {torch.cuda.get_device_name(0)}')"
 

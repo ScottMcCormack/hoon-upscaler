@@ -19,6 +19,9 @@ import sys
 import cv2
 import numpy as np
 
+if len(sys.argv) < 5:
+    sys.exit(__doc__.strip())
+
 INTERP, SOURCE, PTSFILE, OUT = sys.argv[1:5]
 GAP_MS = float(sys.argv[5]) if len(sys.argv) > 5 else 100.0
 EASE = int(sys.argv[6]) if len(sys.argv) > 6 else 0

@@ -121,7 +121,7 @@ def main():
     from pathlib import Path
     fdir = Path(os.environ.get("FRAMES_DIR", f"frames_{TAG}"))
     fdir.mkdir(parents=True, exist_ok=True)
-    for old in fdir.glob("*.png"):
+    for old in fdir.glob("f_*.png"):        # only what this script writes
         old.unlink()
 
     written = 0

@@ -19,6 +19,9 @@ import sys
 import cv2
 import numpy as np
 
+if len(sys.argv) < 3:
+    sys.exit(__doc__.strip())
+
 IN, OUT = sys.argv[1], sys.argv[2]
 WIN = int(sys.argv[3]) if len(sys.argv) > 3 else 61
 STRENGTH = float(sys.argv[4]) if len(sys.argv) > 4 else 1.0

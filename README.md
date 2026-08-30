@@ -47,6 +47,14 @@ pip install opencv-contrib-python-headless numpy ultralytics
 The cu130 index matters on Blackwell cards (RTX 50-series) — stock builds have no
 `sm_120` kernels. On Ampere/Ada, any recent build works.
 
+`ffmpeg` and `ffprobe` must also be on PATH, and **the ffmpeg build must include the
+vidstab filters** — the stabilise step uses `vidstabdetect` and `vidstabtransform`, which
+require `--enable-libvidstab`. Not every distribution build has them. Check with:
+
+```bash
+ffmpeg -filters | grep vidstab      # expect vidstabdetect and vidstabtransform
+```
+
 SeedVR2 is a separate project and is not installed by the above. Clone it beside this
 repository:
 

@@ -117,7 +117,12 @@ def main():
     fps = cap.get(cv2.CAP_PROP_FPS)
     print(f"stabilised source {sw}x{sh}, {n} frames")
 
-    path = camera_path(fill_gaps(pick_subject(dets, n), n), n)
+    chosen = pick_subject(dets, n)
+    if not chosen:
+        sys.exit(f"no vehicle detected in any of {n} frames — nothing to track. Check "
+                 f"{DETS} was generated from the right video, and that the subject is "
+                 f"actually visible in it.")
+    path = camera_path(fill_gaps(chosen, n), n)
 
     # Window size in source pixels, forced even for the encoder
     cw = int(round(WIN_W / ZOOM / SCALE)) // 2 * 2

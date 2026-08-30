@@ -35,6 +35,11 @@ for line in open(PTSFILE):
         except ValueError:
             pass
 pts = np.array(pts)
+if pts.size < 2:
+    sys.exit(f"{PTSFILE} holds {pts.size} timestamps - need at least 2")
+# i60.mp4 and the concat render both start at t=0, but a source with a non-zero first
+# PTS would shift every stall boundary. No-op when already zero-based.
+pts = pts - pts[0]
 gaps = np.diff(pts)
 is_stall = gaps > (GAP_MS / 1000.0)
 print(f"source {len(pts)} frames, {int(is_stall.sum())} stalls >{GAP_MS:.0f}ms, ease={EASE}")
@@ -75,7 +80,19 @@ while True:
         break
     t = k / fps
     i = int(np.searchsorted(pts, t, side="right") - 1)
-    i = max(0, min(i, len(pts) - 2))
+
+    # Past the final source timestamp there is no interval to be inside. Clamping back
+    # into the last one drives `remain` negative, which pushes the ease weights outside
+    # 0..1 and extrapolates instead of blending - a visibly wrong tail. Hold the final
+    # frame instead.
+    if i >= len(pts) - 1:
+        advance_to(len(pts) - 1)
+        vw.write(cur if cur is not None else f_interp)
+        held += 1
+        k += 1
+        continue
+
+    i = max(0, i)
     advance_to(i)
 
     if is_stall[i] and cur is not None:

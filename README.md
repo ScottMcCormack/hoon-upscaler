@@ -97,3 +97,14 @@ The source captured 352×288. Everything above that is **reconstructed, not reco
 the model infers plausible detail rather than revealing hidden detail. It is consistent
 and convincing, but it is not evidence. During development the model rendered a phone
 number on a sign cleanly and incorrectly. Good for watching; not for reading.
+
+## Licence
+
+Apache-2.0 — see [LICENSE](LICENSE).
+
+One caveat worth reading before reuse: `pipeline/detect_car.py` imports `ultralytics`,
+which is AGPL-3.0, so the permissive licence here does not extend to that file's
+dependency chain. [NOTICE](NOTICE) has the detail. No code licence covers the footage.
+
+Contribution terms and the standard for adding to `docs/findings.md` are in
+[CONTRIBUTING.md](CONTRIBUTING.md).

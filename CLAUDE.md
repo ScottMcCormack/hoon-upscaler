@@ -4,6 +4,22 @@ Restoration pipeline for degraded handheld video. Built for a 2007 Nokia N90 cli
 (352×288, 15fps VFR, mpeg4 509kbps) of a burnout at a Perth speedway, but the recipe
 generalises to other low-resolution phone/camcorder footage.
 
+## Repository conventions
+
+**`main` is protected and only ever receives commits through a pull request.** Never
+`git push origin main`. Branch from `main`, push the branch, open a PR.
+
+**PRs are always squash-merged** — one PR becomes one commit on `main`. Branch commit
+messages are working notes; the PR title and body become the permanent commit message, so
+put the real explanation there.
+
+**Never commit credentials, media, or model weights.** `.gitignore` covers the known
+cases; if something new appears, extend it rather than committing the file. A committed
+API key is compromised even if the commit is later removed — say so and rotate it.
+
+See `CONTRIBUTING.md` for the full terms, including the standard for adding to
+`docs/findings.md`.
+
 ## Working style that proved correct
 
 **On perceptual artifacts, trust Scott's eye over invented metrics.** Six metrics were

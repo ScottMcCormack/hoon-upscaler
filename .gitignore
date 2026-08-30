@@ -51,3 +51,6 @@ out/
 !masters/README.md
 experiments/
 !experiments/README.md
+
+# --- claude code: local overrides are per-machine ---
+.claude/settings.local.json

@@ -1,7 +1,5 @@
 # Terms of use and contribution
 
-<!-- TODO(scott): one open item remains, under Contributions. -->
-
 ## Licence
 
 This project's own code is licensed **Apache-2.0** — see [LICENSE](LICENSE).
@@ -89,5 +87,13 @@ render, say that it is AI-reconstructed.
 
 ## Contributions
 
-TODO(scott): state whether outside contributions are accepted at all, and if so whether
-you want issues opened before PRs.
+Contributions are welcome. **Open an issue before sending a pull request** so the
+approach can be agreed first — a lot of the reasoning in this repository is about what
+was already tried and ruled out, and an issue is the cheapest place to find out that
+your idea is in [docs/findings.md](docs/findings.md) already.
+
+Issues are also the right place for bug reports, questions, and results from running the
+recipe on your own footage — the last of these is genuinely useful, since everything here
+was tuned against a single 2007 Nokia N90 clip.
+
+Pull requests should keep `main` mergeable by squash: one PR, one coherent change.

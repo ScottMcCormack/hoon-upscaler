@@ -52,13 +52,19 @@ Other dependencies — no copyleft obligation for this project
                                            ffmpeg binary still carries its own
                                            terms if you redistribute the binary.
 
-  SeedVR2 (ComfyUI-SeedVR2_VideoUpscaler)  Cloned and invoked as a separate CLI
+  SeedVR2 (ComfyUI-SeedVR2_VideoUpscaler)  Apache-2.0
+  SeedVR2 (ByteDance-Seed/SeedVR)          Apache-2.0
+  SeedVR2 model weights, 3B and 7B         Apache-2.0
+
+                                           Cloned and invoked as a separate CLI
                                            by cloud/run_on_pod.sh; not vendored.
-                                           TODO(scott): confirm the upstream
-                                           licence and the SeedVR2 model weights'
-                                           terms before relying on either
-                                           commercially.
+                                           Weights were checked separately from
+                                           the code, since model repositories
+                                           often carry different terms; here they
+                                           do not. No copyleft obligation arises
+                                           from SeedVR2.
                                            https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler
+                                           https://huggingface.co/ByteDance-Seed/SeedVR2-3B
 
 ================================================================================
 Footage

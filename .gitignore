@@ -49,3 +49,5 @@ input/
 masters/
 out/
 !masters/README.md
+experiments/
+!experiments/README.md

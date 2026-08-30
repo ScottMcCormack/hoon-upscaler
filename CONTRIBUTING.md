@@ -27,8 +27,13 @@ where you share it.
 - Every change lands through a pull request.
 - **PRs are always squash-merged.** One PR becomes one commit on `main`.
 
-Because the merge squashes, commit messages on a branch are working notes. The **PR title
-and body become the permanent commit message** — put the real explanation there.
+Because the merge squashes, **your commit messages become the permanent record on `main`**
+— GitHub prefills the squash commit body by concatenating them. Write them for someone
+reading `git log` in a year, not as working notes. The PR title supplies the squash
+commit's subject line; the PR description is review context and is *not* carried over.
+
+Whoever merges can edit the prefilled message, so process commits ("address review",
+"fix typo") are worth trimming out of the box before confirming.
 
 After a merge:
 

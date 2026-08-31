@@ -9,10 +9,10 @@ generalises to other low-resolution phone/camcorder footage.
 **`main` is protected and only ever receives commits through a pull request.** Never
 `git push origin main`. Branch from `main`, push the branch, open a PR.
 
-**PRs are always squash-merged** — one PR becomes one commit on `main`, and its body is
-prefilled from the branch's commit messages concatenated. Commit messages are therefore
-the permanent record, not working notes; the PR description is review context and is not
-carried over. Write each commit message for `git log`.
+**PRs are always squash-merged** — one PR becomes one commit on `main`, prefilled from the
+PR title and description. The PR description is therefore the permanent record; branch
+commit messages are working notes that do not survive the merge. Keep the PR description
+current as the branch changes, and write it for `git log`, not for the reviewer.
 
 **Never commit credentials, media, or model weights.** `.gitignore` covers the known
 cases; if something new appears, extend it rather than committing the file. A committed

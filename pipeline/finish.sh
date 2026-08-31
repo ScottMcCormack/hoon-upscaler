@@ -113,11 +113,23 @@ ffmpeg -y -v error -f concat -safe 0 -i "$W/concat.txt" -i "$SRC_ORIG" \
   -c:a aac -b:a 128k -movflags +faststart "$OUT_DIR/${TAG}_lumafix_14fps_ungraded.mp4"
 
 echo "### [4/5] 60fps interpolation"
+# minterpolate ends before its last input frame - it has nothing to interpolate into -
+# and drops roughly a fifth of a second off the tail. This is not VFR-specific: a
+# perfectly CFR 15fps input loses the same frames, with or without motion estimation.
+# Clone a few frames onto the end so the filter has somewhere to run to, then trim back
+# to the length the SOURCE says we should have. Deriving the target from the source
+# rather than from the render keeps this independent of the concat timebase (issue #2).
+SRC_DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$SRC_ORIG")
+EXPECT60=$(python -c "print(round($SRC_DUR * 60))")
+echo "    target $EXPECT60 frames (source spans ${SRC_DUR}s)"
+
 # Interpolate from the GRADED render — the selective pass pulls held frames from it, and
 # mixing graded with ungraded puts a ~10-17 luma step at every hold boundary.
 ffmpeg -y -v error -i "$OUT_DIR/${TAG}_lumafix_14fps.mp4" \
-  -vf "minterpolate=fps=60:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1:scd=none" \
+  -vf "tpad=stop=8:stop_mode=clone,minterpolate=fps=60:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1:scd=none,trim=end_frame=$EXPECT60,setpts=PTS-STARTPTS" \
   -c:v libx264 -preset fast -crf 12 -an "$W/i60.mp4"
+I60_N=$(ffprobe -v error -select_streams v:0 -count_packets -show_entries stream=nb_read_packets -of csv=p=0 "$W/i60.mp4")
+echo "    interpolated $I60_N frames"
 
 echo "### [5/5] selective pass (hold gaps >150ms, ease 3)"
 python "$HERE/selective_interp.py" "$W/i60.mp4" "$OUT_DIR/${TAG}_lumafix_14fps.mp4" \

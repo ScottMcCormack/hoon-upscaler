@@ -27,20 +27,32 @@ GAP_MS = float(sys.argv[5]) if len(sys.argv) > 5 else 100.0
 EASE = int(sys.argv[6]) if len(sys.argv) > 6 else 0
 
 pts = []
-for line in open(PTSFILE):
+for lineno, line in enumerate(open(PTSFILE), 1):
     s = line.strip().rstrip(",")
-    if s:
-        try:
-            pts.append(float(s))
-        except ValueError:
-            pass
+    if not s:
+        continue
+    try:
+        pts.append(float(s))
+    except ValueError:
+        # Skipping the line would shift every later timestamp against its source frame
+        # index, holding the wrong frames while still producing a plausible video.
+        sys.exit(f"{PTSFILE}:{lineno}: cannot read {s!r} as a timestamp.")
 pts = np.array(pts)
 if pts.size < 2:
     sys.exit(f"{PTSFILE} holds {pts.size} timestamps - need at least 2")
+if not np.all(np.isfinite(pts)):
+    sys.exit(f"{PTSFILE} contains non-finite timestamps")
 # i60.mp4 and the concat render both start at t=0, but a source with a non-zero first
 # PTS would shift every stall boundary. No-op when already zero-based.
 pts = pts - pts[0]
 gaps = np.diff(pts)
+# searchsorted below assumes sorted input, and finish.sh already requires this of the
+# same file. Duplicate or decreasing timestamps would select the wrong interval and
+# hold the wrong frames, silently.
+if np.any(gaps <= 0):
+    bad = int(np.argmax(gaps <= 0))
+    sys.exit(f"{PTSFILE} is not strictly increasing at index {bad}: "
+             f"{pts[bad]:.6f} -> {pts[bad + 1]:.6f}")
 is_stall = gaps > (GAP_MS / 1000.0)
 print(f"source {len(pts)} frames, {int(is_stall.sum())} stalls >{GAP_MS:.0f}ms, ease={EASE}")
 

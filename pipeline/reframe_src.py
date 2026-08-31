@@ -157,11 +157,15 @@ def main():
     for old in fdir.glob("f_*.png"):        # only what this script writes
         old.unlink()
 
+    # Every failure below is fatal. This sequence feeds a restoration model and is
+    # later matched frame-for-frame against source timestamps, so a short or gapped
+    # run must not be reported as a successful one.
     written = 0
     for i in range(n):
         ok, frame = cap.read()
         if not ok:
-            break
+            sys.exit(f"decode failed at frame {i} of {n}. Stopping here would leave a "
+                     f"truncated sequence that reads as complete downstream.")
         cx, cy = stabfirst_to_src(*path[i])
         x0 = int(round(cx - cw / 2))
         y0 = int(round(cy - ch / 2))
@@ -169,11 +173,17 @@ def main():
         y0 = max(0, min(y0, sh - ch))
         crop = frame[y0:y0 + ch, x0:x0 + cw]
         if crop.shape[:2] != (ch, cw):
-            continue
-        cv2.imwrite(str(fdir / f"f_{written:06d}.png"), crop)
+            sys.exit(f"crop at frame {i} is {crop.shape[1]}x{crop.shape[0]}, expected "
+                     f"{cw}x{ch}. Skipping it would break the frame/timestamp "
+                     f"correspondence that finish.sh enforces.")
+        dest = fdir / f"f_{written:06d}.png"
+        if not cv2.imwrite(str(dest), crop):
+            sys.exit(f"failed to write {dest} - out of disk space, or a bad path?")
         written += 1
 
     cap.release()
+    if written != n:
+        sys.exit(f"wrote {written} frames but the source advertised {n}")
     print(f"wrote {written} lossless frames to {fdir}")
 
 

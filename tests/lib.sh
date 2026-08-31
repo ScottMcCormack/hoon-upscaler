@@ -17,6 +17,11 @@ assert_eq() {  # name expected actual
   [ "$2" = "$3" ] && ok "$1" || bad "$1" "expected '$2', got '$3'"
 }
 
+assert_under() {  # name limit actual  — actual must be < limit
+  if python -c "import sys; sys.exit(0 if $3 < $2 else 1)" 2>/dev/null
+  then ok "$1 ($3 < $2)"; else bad "$1" "expected < $2, got $3"; fi
+}
+
 assert_exits_nonzero() {  # name description command...
   local name="$1" desc="$2"; shift 2
   if "$@" >/dev/null 2>&1; then bad "$name" "$desc — command succeeded but should have failed"
@@ -49,13 +54,18 @@ duration_of() {
 # A variable-frame-rate clip with a real stall, built by dropping frames from a CFR
 # source. Every gap is then an exact multiple of 1/15, which is the property the real
 # Nokia footage has and the one the timing code must preserve.
-#   mk_vfr_source <out.mp4> <total_cfr_frames> <drop_from> <drop_to>
+# A second stall is not redundant: state carried between stalls has been wrong before
+# while a single-stall clip still passed, because the first stall works and only later
+# ones fail.
+#   mk_vfr_source <out.mp4> <total_cfr_frames> <drop_from> <drop_to> [from2] [to2]
 mk_vfr_source() {
-  local out="$1" total="$2" from="$3" to="$4"
+  local out="$1" total="$2" from="$3" to="$4" from2="${5:-}" to2="${6:-}"
+  local sel="not(between(n,$from,$to))"
+  [ -n "$from2" ] && sel="$sel*not(between(n,$from2,$to2))"
   ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=s=64x36:r=15:d=20" \
     -frames:v "$total" -c:v libx264 -crf 20 -pix_fmt yuv420p "$out.cfr.mp4"
   ffmpeg -hide_banner -loglevel error -y -i "$out.cfr.mp4" \
-    -vf "select='not(between(n,$from,$to))'" -fps_mode passthrough \
+    -vf "select='$sel'" -fps_mode passthrough \
     -c:v libx264 -crf 20 -pix_fmt yuv420p "$out"
   rm -f "$out.cfr.mp4"
 }

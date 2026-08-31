@@ -78,7 +78,7 @@ if len(fr) != len(pts):
     )
 
 n = len(fr)
-out, durs = [], []
+durs = []
 for i in range(n - 1):
     d = pts[i + 1] - pts[i]
     if d <= 0:
@@ -88,27 +88,47 @@ for i in range(n - 1):
             f"but wrong result, so it is an error."
         )
     durs.append(d)
-    out.append(f"file '{fr[i].name}'\nduration {d:.6f}")
 
 # The final frame has no following timestamp, so its duration is chosen rather than
 # derived. The median of the real gaps is the modal frame period and, unlike the last
 # gap, cannot accidentally inherit a stall.
 term = sorted(durs)[len(durs) // 2] if durs else 1 / 15
-out.append(f"file '{fr[n-1].name}'\nduration {term:.6f}")
-# Deliberately NO repeated final entry. The old idiom - repeat the last file so it gets
-# a duration - was correct while the loop wrote only n-1 entries. Now that all n are
-# written with explicit durations, repeating emits an n+1th frame: N in, N+1 out.
-w.joinpath("concat.txt").write_text("\n".join(out) + "\n")
-print(f"    concat {n} frames spanning {sum(durs)+term:.2f}s")
+
+# Timing is expressed as a CONSTANT rate with held frames repeated, not as per-frame
+# `duration` directives. The concat demuxer takes its timebase from the image demuxer,
+# which defaults to 1/25, and silently rounds every duration to that grid - a steady
+# 66.7ms cadence comes out as 80/40/80/40. Repeats have no such problem: this camera
+# only ever stalls for whole multiples of a frame period, so the same playback is
+# exactly representable at the base rate.
+base = 1.0 / min(durs) if durs else 15.0
+worst = max(abs(d * base - round(d * base)) for d in durs + [term])
+if worst > 0.02:
+    raise SystemExit(
+        f"!! source gaps are not whole multiples of {1000/base:.1f}ms (worst offender is "
+        f"{worst:.3f} of a frame out). This footage cannot be expressed exactly at a "
+        f"constant rate, and the concat-duration alternative would quantise it to 40ms. "
+        f"Handle this source explicitly rather than silently approximating it."
+    )
+
+reps = [max(1, round(d * base)) for d in durs] + [max(1, round(term * base))]
+lines = []
+for f, r in zip(fr, reps):
+    lines += [f"file '{f.name}'"] * r
+w.joinpath("concat.txt").write_text("\n".join(lines) + "\n")
+w.joinpath("base_fps.txt").write_text(f"{base:.6f}\n")
+held = sum(r - 1 for r in reps)
+print(f"    concat {n} source frames -> {len(lines)} at {base:.3f}fps "
+      f"({held} held), spanning {sum(durs)+term:.2f}s")
 PY
 
 echo "### [3/5] source-cadence renders"
-ffmpeg -y -v error -f concat -safe 0 -i "$W/concat.txt" -i "$SRC_ORIG" \
-  -map 0:v:0 -map 1:a:0? -vsync vfr -video_track_timescale 15000 \
+BASE_FPS=$(cat "$W/base_fps.txt")
+ffmpeg -y -v error -r "$BASE_FPS" -f concat -safe 0 -i "$W/concat.txt" -i "$SRC_ORIG" \
+  -map 0:v:0 -map 1:a:0? -r "$BASE_FPS" \
   -vf "$GRADE" -c:v libx264 -preset medium -crf 17 -pix_fmt yuv420p \
   -c:a aac -b:a 128k -movflags +faststart "$OUT_DIR/${TAG}_lumafix_14fps.mp4"
-ffmpeg -y -v error -f concat -safe 0 -i "$W/concat.txt" -i "$SRC_ORIG" \
-  -map 0:v:0 -map 1:a:0? -vsync vfr -video_track_timescale 15000 \
+ffmpeg -y -v error -r "$BASE_FPS" -f concat -safe 0 -i "$W/concat.txt" -i "$SRC_ORIG" \
+  -map 0:v:0 -map 1:a:0? -r "$BASE_FPS" \
   -c:v libx264 -preset medium -crf 17 -pix_fmt yuv420p \
   -c:a aac -b:a 128k -movflags +faststart "$OUT_DIR/${TAG}_lumafix_14fps_ungraded.mp4"
 

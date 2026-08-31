@@ -31,7 +31,7 @@ echo "timing fidelity (issues #2, #3)"
 
 if want timing; then
   SRC="$W/src.mp4"; RAW="$W/raw.mp4"; OUT="$W/out"
-  mk_vfr_source "$SRC" 21 5 8          # 17 frames, one 333ms stall
+  mk_vfr_source "$SRC" 40 5 8 20 24    # two stalls, so state carried between them is tested
   N="$(frame_count "$SRC")"
   mk_upscaled "$RAW" "$N"
   mkdir -p "$OUT"
@@ -42,12 +42,40 @@ if want timing; then
   if [ ! -f "$RENDER" ]; then
     bad "timing: finish.sh produced a source-cadence render" "$(tail -1 "$W/finish.log")"
   else
-    assert_eq "timing: render frame count matches source" "$N" "$(frame_count "$RENDER")"
+    # The render is CFR with held frames repeated, so it has MORE frames than the
+    # source. What must hold is that every source moment exists in it, exactly.
+    MISSING="$(python - "$W" <<'PY'
+import subprocess, sys
+def pts(f):
+    out = subprocess.run(["ffprobe","-v","error","-select_streams","v:0",
+                          "-show_entries","frame=pts_time","-of","csv=p=0",f],
+                         capture_output=True, text=True).stdout
+    return [float(x.rstrip(",")) for x in out.split() if x.strip()]
+src, ren = pts(sys.argv[1] + "/src.mp4"), pts(sys.argv[1] + "/out/T_lumafix_14fps.mp4")
+worst = max(min(abs(s - r) for r in ren) for s in src)
+print(f"{worst:.6f}")
+PY
+)"
+    # 1ms is 1.5% of a frame period at 15fps — comfortably "exact", and 13x tighter
+    # than the 13.3ms error the 25fps concat grid used to produce.
+    assert_under "timing: every source timestamp exists in the render (#2)" 0.001 "$MISSING"
 
-    # Issue #2 — every frame must sit at its source timestamp, not on a 25fps grid.
-    paste -d' ' <(pts_of "$SRC") <(pts_of "$RENDER") > "$W/pairs.txt"
-    WORST="$(awk '{d=$1-$2; if(d<0)d=-d; if(d>m){m=d; w=NR}} END{printf "%.6f@%d", m, w}' "$W/pairs.txt")"
-    assert_eq "timing: render timestamps equal source timestamps (#2)" "0.000000@" "${WORST%@*}@"
+    # Every stall must actually be held. A single-stall clip cannot catch state that
+    # goes wrong after the first one — which is exactly how a reader-position bug
+    # survived a green suite once already.
+    HELD="$(grep 'interpolated (' "$W/finish.log" | grep -oE '[0-9]+ held' | grep -oE '^[0-9]+' || echo 0)"
+    EXPECT_HELD="$(python - "$W" <<'PY'
+import subprocess, sys
+out = subprocess.run(["ffprobe","-v","error","-select_streams","v:0","-show_entries",
+                      "frame=pts_time","-of","csv=p=0", sys.argv[1]+"/src.mp4"],
+                     capture_output=True, text=True).stdout
+p = [float(x.rstrip(",")) for x in out.split() if x.strip()]
+g = [p[i+1]-p[i] for i in range(len(p)-1)]
+print(round(sum(d for d in g if d > 0.150) * 60 * 0.5))   # half the stall span, a floor
+PY
+)"
+    if [ "$HELD" -ge "$EXPECT_HELD" ]; then ok "timing: held frames cover both stalls ($HELD >= $EXPECT_HELD)"
+    else bad "timing: held frames cover both stalls" "only $HELD held, expected at least $EXPECT_HELD"; fi
 
     # Issue #3 — the deliverable must not end before the source does.
     if [ -f "$K5" ]; then

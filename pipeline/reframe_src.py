@@ -105,7 +105,11 @@ def main():
     dets = json.load(open(DETS))
     meta = dets.pop("_meta", None)
     if meta is None:
-        print(f"    WARNING: {DETS} records no coordinate space; assuming {FW}x{FH}")
+        if os.environ.get("ASSUME_DETECT_SPACE") != f"{FW}x{FH}":
+            sys.exit(f"{DETS} records no coordinate space. Re-run detect_car.py to add "
+                     f"one, or set ASSUME_DETECT_SPACE={FW}x{FH} to proceed on the "
+                     f"assumption that it is already STABFIRST.")
+        print(f"    assuming {FW}x{FH} per ASSUME_DETECT_SPACE")
     elif (meta["width"], meta["height"]) != (FW, FH):
         sys.exit(f"detections are in {meta['width']}x{meta['height']} space but the camera "
                  f"solve expects STABFIRST ({FW}x{FH}). Re-run detect_car.py against the "

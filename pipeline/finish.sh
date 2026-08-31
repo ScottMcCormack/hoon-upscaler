@@ -72,26 +72,34 @@ n = len(fr)
 out, durs = [], []
 for i in range(n - 1):
     d = pts[i + 1] - pts[i]
-    d = d if d > 0 else 1 / 15
+    if d <= 0:
+        raise SystemExit(
+            f"!! non-monotonic source timestamps at frame {i}: "
+            f"{pts[i]:.6f} -> {pts[i+1]:.6f}. Clamping this would produce a plausible "
+            f"but wrong result, so it is an error."
+        )
     durs.append(d)
     out.append(f"file '{fr[i].name}'\nduration {d:.6f}")
 
-# The final frame has no following timestamp, so its duration has to be chosen rather
-# than derived. The median of the real gaps is closer than the nominal 1/15.
+# The final frame has no following timestamp, so its duration is chosen rather than
+# derived. The median of the real gaps is the modal frame period and, unlike the last
+# gap, cannot accidentally inherit a stall.
 term = sorted(durs)[len(durs) // 2] if durs else 1 / 15
 out.append(f"file '{fr[n-1].name}'\nduration {term:.6f}")
-out.append(f"file '{fr[n-1].name}'")     # concat demuxer wants the last file repeated
+# Deliberately NO repeated final entry. The old idiom - repeat the last file so it gets
+# a duration - was correct while the loop wrote only n-1 entries. Now that all n are
+# written with explicit durations, repeating emits an n+1th frame: N in, N+1 out.
 w.joinpath("concat.txt").write_text("\n".join(out) + "\n")
-print(f"    concat {n} frames spanning {pts[-1]-pts[0]+term:.2f}s")
+print(f"    concat {n} frames spanning {sum(durs)+term:.2f}s")
 PY
 
 echo "### [3/5] source-cadence renders"
 ffmpeg -y -v error -f concat -safe 0 -i "$W/concat.txt" -i "$SRC_ORIG" \
-  -map 0:v:0 -map 1:a:0 -shortest -vsync vfr -video_track_timescale 15000 \
+  -map 0:v:0 -map 1:a:0? -vsync vfr -video_track_timescale 15000 \
   -vf "$GRADE" -c:v libx264 -preset medium -crf 17 -pix_fmt yuv420p \
   -c:a aac -b:a 128k -movflags +faststart "$OUT_DIR/${TAG}_lumafix_14fps.mp4"
 ffmpeg -y -v error -f concat -safe 0 -i "$W/concat.txt" -i "$SRC_ORIG" \
-  -map 0:v:0 -map 1:a:0 -shortest -vsync vfr -video_track_timescale 15000 \
+  -map 0:v:0 -map 1:a:0? -vsync vfr -video_track_timescale 15000 \
   -c:v libx264 -preset medium -crf 17 -pix_fmt yuv420p \
   -c:a aac -b:a 128k -movflags +faststart "$OUT_DIR/${TAG}_lumafix_14fps_ungraded.mp4"
 
@@ -105,7 +113,7 @@ ffmpeg -y -v error -i "$OUT_DIR/${TAG}_lumafix_14fps.mp4" \
 echo "### [5/5] selective pass (hold gaps >150ms, ease 3)"
 python "$HERE/selective_interp.py" "$W/i60.mp4" "$OUT_DIR/${TAG}_lumafix_14fps.mp4" \
   "$W/pts.txt" "$W/sel.mkv" 150 3 2>&1 | tail -2
-ffmpeg -y -v error -i "$W/sel.mkv" -i "$SRC_ORIG" -map 0:v:0 -map 1:a:0 -shortest \
+ffmpeg -y -v error -i "$W/sel.mkv" -i "$SRC_ORIG" -map 0:v:0 -map 1:a:0? \
   -c:v libx264 -preset medium -crf 18 -pix_fmt yuv420p -c:a aac -b:a 128k \
   -movflags +faststart "$OUT_DIR/${TAG}_lumafix_K5.mp4"
 

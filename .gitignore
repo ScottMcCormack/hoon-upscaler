@@ -45,11 +45,13 @@ Thumbs.db
 venv
 
 # --- local media (kept on disk, never committed) ---
+# NB: excluding a DIRECTORY cannot be undone by a later negation - git never descends
+# into an excluded directory, so `masters/` + `!masters/README.md` silently ignores the
+# README too. Exclude the contents with /* so the negation can apply.
 input/
-masters/
-out/
+masters/*
 !masters/README.md
-experiments/
+experiments/*
 !experiments/README.md
 
 # --- claude code: local overrides are per-machine ---

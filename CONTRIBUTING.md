@@ -55,8 +55,16 @@ git branch -D your-branch     # -D, not -d: the squash commit is new, so the
 | `models/`, `*.safetensors`, `*.pth`, `*.gguf` | Model weights belong to their upstream projects. |
 | `input/`, `masters/`, `out/`, `work/`, `frames_*/` | Working media. Kept on disk, never pushed. |
 
-If you need a file to survive, add a `README.md` in its directory and a `!` negation to
-[.gitignore](.gitignore) — `masters/` and `experiments/` already do this.
+If you need a file to survive inside an ignored directory, exclude the directory's
+**contents** rather than the directory itself, then negate:
+
+```gitignore
+masters/*
+!masters/README.md
+```
+
+`masters/` on its own cannot be undone by a later `!` line — git never descends into an
+excluded directory, so the negation is silently ignored along with everything else.
 
 **If a credential is ever committed, it is compromised.** Rotate it. Removing the commit
 is not sufficient.

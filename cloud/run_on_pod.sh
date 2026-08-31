@@ -28,6 +28,10 @@ fi
 echo "### GPU ###"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 VRAM=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -1)
+# A non-integer here (nvidia-smi emits [N/A] on some virtualised GPUs) would make the
+# comparisons below error inside an `if`, which set -e does not catch, silently
+# selecting the fp8 CPU-offload path on a card that does not need it.
+[[ "$VRAM" =~ ^[0-9]+$ ]] || { echo "!! could not read VRAM, got: '$VRAM'"; exit 1; }
 
 echo "### system deps ###"
 apt-get update -qq >/dev/null 2>&1 || true
@@ -92,7 +96,11 @@ count_frames() {
     n=$(ffprobe -v error -select_streams v:0 -count_packets \
         -show_entries stream=nb_read_packets -of csv=p=0 "$1")
   fi
-  echo "${n:-0}"
+  if ! [ "${n:-0}" -gt 0 ] 2>/dev/null; then
+    echo "!! could not determine frame count for $1" >&2
+    return 1
+  fi
+  echo "$n"
 }
 IN_N=$(count_frames "$IN")
 OUT_N=$(count_frames "$OUT")

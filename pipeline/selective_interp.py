@@ -73,7 +73,7 @@ def advance_to(i):
         cur_idx += 1
 
 
-k = passed = held = eased = 0
+k = passed = held = eased = tail = 0
 while True:
     ok, f_interp = ci.read()
     if not ok:
@@ -88,11 +88,10 @@ while True:
     if i >= len(pts) - 1:
         advance_to(len(pts) - 1)
         vw.write(cur if cur is not None else f_interp)
-        held += 1
+        tail += 1
         k += 1
         continue
 
-    i = max(0, i)
     advance_to(i)
 
     if is_stall[i] and cur is not None:
@@ -115,4 +114,5 @@ while True:
 
 ci.release(); cs.release(); vw.release()
 print(f"{k} frames: {passed} interpolated ({100*passed/max(k,1):.0f}%), "
-      f"{held} held ({100*held/max(k,1):.0f}%), {eased} eased ({100*eased/max(k,1):.0f}%)")
+      f"{held} held ({100*held/max(k,1):.0f}%), {eased} eased ({100*eased/max(k,1):.0f}%), "
+      f"{tail} past the last timestamp")

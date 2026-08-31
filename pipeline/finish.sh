@@ -1,5 +1,9 @@
 #!/bin/bash
-# Finishing pipeline: luma fix -> true VFR timing -> grade -> selective 60fps.
+# Finishing pipeline: luma fix -> source-cadence timing -> grade -> selective 60fps.
+#
+# "Source cadence" not "true timing": the concat demuxer snaps each frame's duration to a
+# 40ms grid, so stalls survive and the total span is preserved, but individual durations
+# are within ~13ms rather than exact. See issue #2.
 #
 # Takes the raw output of a SeedVR2 upscale and produces watchable deliverables.
 # The ORIGINAL source is needed for two things: its real per-frame timestamps, and
@@ -20,6 +24,11 @@ set -euo pipefail
 
 RAW="${1:?raw upscaled mp4 required}"
 TAG="${2:?tag required}"
+# TAG is interpolated into the work directory below, which is later rm -rf'd. Reject
+# anything that could escape OUT_DIR.
+case "$TAG" in
+  */*|*\\*|.|..|*..*|"") echo "!! invalid tag '$TAG': no path separators or .. allowed"; exit 1 ;;
+esac
 SRC_ORIG="${3:?original source mp4 required}"
 OUT_DIR="${4:-$PWD/out}"
 
@@ -46,7 +55,7 @@ ffprobe -v error -select_streams v:0 -show_entries stream=width,height,nb_frames
 echo "### [1/5] temporal luma stabilisation"
 python "$HERE/luma_stabilise.py" "$RAW" "$W/stab.mkv" 61 1.0 2>&1 | tail -4
 
-echo "### [2/5] frames + true timings"
+echo "### [2/5] frames + source timings"
 ffprobe -v error -select_streams v:0 -show_entries frame=pts_time -of csv=p=0 "$SRC_ORIG" \
   | tr -d ',' | grep -v '^$' > "$W/pts.txt"
 rm -f "$W"/f_*.png

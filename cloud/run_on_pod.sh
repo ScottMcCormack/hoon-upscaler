@@ -16,6 +16,11 @@
 set -euo pipefail
 RES="${1:-720}"
 MODE="${2:-full}"
+case "$MODE" in
+  test|full) ;;
+  *) echo "!! unknown mode '$MODE' - expected 'test' or 'full'. Refusing to guess, since"
+     echo "   the wrong guess is the chargeable full render."; exit 1 ;;
+esac
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 if [ "$MODE" = "test" ]; then

@@ -43,7 +43,9 @@ right", produce a visual comparison and ask.
   hurt SeedVR2, which is trained on degraded input and wants artifacts left in.
 - **Never flatten variable frame timing.** Extracting frames at constant rate discards
   the camera's real per-frame durations. A 267ms stall then plays in 70ms and the subject
-  appears to leap. Restore true durations via ffmpeg's concat demuxer.
+  appears to leap. Restore per-frame durations via ffmpeg's concat demuxer. The rule is
+  directional, not a claim of exactness: the demuxer snaps durations to a 40ms grid, so
+  stalls and total span survive but individual frames land within ~13ms (issue #2).
 - **Stabilise before upscaling.** Shake moves content *inside* the model's temporal batch,
   which it reconciles by inventing doubled detail (ghost text).
 - **Interpolate from the same grade the held frames come from.** Mixing graded and

@@ -27,7 +27,7 @@ source (352×288, VFR, heavily compressed)
   ├─ 3. (no pre-filter)    deliberately — see CLAUDE.md
   ├─ 4. SeedVR2 upscale    3B fp16, resolution 1080, batch 33, overlap 5
   ├─ 5. luma stabilise     removes the camera's auto-exposure hunting
-  ├─ 6. restore VFR timing rebuild with each frame's true duration
+  ├─ 6. restore cadence    rebuild per-frame durations (±13ms, see #2)
   ├─ 7. grade              contrast 1.20 / saturation 1.28 / gamma 0.96, no unsharp
   └─ 8. selective 60fps    interpolate normal gaps, hold through camera stalls
 ```
@@ -108,19 +108,20 @@ Produces `MyClip_lumafix_14fps.mp4`, `_14fps_ungraded.mp4` and `_lumafix_K5.mp4`
 
 | File | Purpose |
 |---|---|
-| `pipeline/finish.sh` | Luma fix → true timing → grade → selective 60fps |
+| `pipeline/finish.sh` | Luma fix → source cadence → grade → selective 60fps |
 | `pipeline/luma_stabilise.py` | Removes auto-exposure hunting (global level correction) |
 | `pipeline/selective_interp.py` | Interpolates normal gaps, holds through camera stalls |
 | `pipeline/reframe_src.py` | Solves a deadzone virtual camera from YOLO detections |
 | `pipeline/detect_car.py` | Per-frame subject detection (for tracked reframing) |
+| `cloud/run_on_pod.sh` | Provision-and-run on a rented GPU |
 
-The last two are an **experimental tracked-reframing path, not part of the pipeline above**
+`reframe_src.py` and `detect_car.py` are an **experimental tracked-reframing path, not part
+of the pipeline above**
 and not runnable as shipped. Both operate in "STABFIRST" space — a 1408×1152 intermediate
 (4× the source, then a centred 1.12× crop) that no step in this repository produces. The
 constants in `reframe_src.py` are hardcoded to that geometry, and `detect_car.py` now
 records the space it detected in so a mismatch fails loudly rather than silently solving
 in the wrong coordinates. Producing the STABFIRST intermediate is left undocumented.
-| `cloud/run_on_pod.sh` | Provision-and-run on a rented GPU |
 
 ## Renting a GPU
 

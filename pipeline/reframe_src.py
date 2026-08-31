@@ -43,8 +43,15 @@ def stabfirst_to_src(X, Y):
     return fx / SCALE, fy / SCALE
 
 
+# If the subject reappears further than MAX_JUMP from where it was last seen - a long
+# occlusion, or a fast pan - every later detection is rejected against a stale anchor and
+# the camera freezes for the rest of the clip. Give up on the anchor after this many
+# consecutive rejections and reacquire on confidence.
+REACQUIRE_AFTER = 15
+
+
 def pick_subject(dets, n):
-    chosen, last = {}, None
+    chosen, last, missed = {}, None, 0
     for i in range(n):
         cands = dets.get(str(i), [])
         if not cands:
@@ -56,10 +63,15 @@ def pick_subject(dets, n):
                       for d in cands
                       if np.hypot(d["cx"] - last[0], d["cy"] - last[1]) <= MAX_JUMP]
             if not scored:
-                continue
-            best = min(scored, key=lambda t: t[0])[1]
+                missed += 1
+                if missed < REACQUIRE_AFTER:
+                    continue
+                # stale anchor: reacquire rather than reject forever
+                best = max(cands, key=lambda d: d["conf"])
+            else:
+                best = min(scored, key=lambda t: t[0])[1]
         chosen[i] = (best["cx"], best["cy"])
-        last = chosen[i]
+        last, missed = chosen[i], 0
     return chosen
 
 
@@ -119,6 +131,11 @@ def main():
     sw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     sh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = cap.get(cv2.CAP_PROP_FPS)
+    expect_w, expect_h = int(round(FW / SCALE)), int(round(FH / SCALE))
+    if (sw, sh) != (expect_w, expect_h):
+        sys.exit(f"source is {sw}x{sh} but the inverse transform assumes {expect_w}x{expect_h} "
+                 f"(SCALE={SCALE} against STABFIRST {FW}x{FH}). A different source geometry "
+                 f"would produce plausible crops at the wrong positions and scale.")
     print(f"stabilised source {sw}x{sh}, {n} frames")
 
     chosen = pick_subject(dets, n)

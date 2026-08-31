@@ -1,0 +1,82 @@
+hoon-upscaler
+Copyright 2026 Scott McCormack
+
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
+================================================================================
+Third-party dependencies
+================================================================================
+
+This repository vendors no third-party code. Everything below is installed or
+checked out separately by the user, and remains under its own licence. This
+file records those terms so downstream users are not misled by the Apache-2.0
+licence on this repository's own code.
+
+--------------------------------------------------------------------------------
+Ultralytics (AGPL-3.0) — AFFECTS pipeline/detect_car.py
+--------------------------------------------------------------------------------
+
+  pipeline/detect_car.py imports `ultralytics` and loads the `yolo11m.pt`
+  weights. Both the package and the weights are licensed AGPL-3.0.
+
+  Ultralytics' stated position is that building on their package requires
+  releasing your work under AGPL-3.0 or obtaining an Ultralytics Enterprise
+  Licence. Whether a script that merely imports the library constitutes a
+  derivative work is not settled, and this project does not redistribute
+  ultralytics.
+
+  Practical consequence: the Apache-2.0 licence on this repository should NOT
+  be read as permission to use pipeline/detect_car.py, or a work derived from
+  it, in a closed-source product. Anyone doing so must satisfy AGPL-3.0
+  themselves, or replace the detector.
+
+  pipeline/reframe_src.py consumes detections as JSON and does not import
+  ultralytics, so the reframing solver is unaffected and a different detector
+  can be substituted at that boundary.
+
+  https://github.com/ultralytics/ultralytics
+
+--------------------------------------------------------------------------------
+Other dependencies — no copyleft obligation for this project
+--------------------------------------------------------------------------------
+
+  OpenCV (opencv-contrib-python-headless)  Apache-2.0
+  NumPy                                    BSD-3-Clause
+  PyTorch / torchvision                    BSD-3-Clause
+
+  ffmpeg                                   LGPL-2.1-or-later or GPL-2.0-or-later,
+                                           depending on how the binary was built.
+                                           Invoked here as a subprocess, never
+                                           linked, so its terms do not propagate
+                                           to this project's code. A GPL-built
+                                           ffmpeg binary still carries its own
+                                           terms if you redistribute the binary.
+
+  SeedVR2 (ComfyUI-SeedVR2_VideoUpscaler)  Apache-2.0
+  SeedVR2 (ByteDance-Seed/SeedVR)          Apache-2.0
+  SeedVR2 model weights, 3B and 7B         Apache-2.0
+
+                                           Cloned and invoked as a separate CLI
+                                           by cloud/run_on_pod.sh; not vendored.
+                                           Weights were checked separately from
+                                           the code, since model repositories
+                                           often carry different terms; here they
+                                           do not. No copyleft obligation arises
+                                           from SeedVR2.
+                                           https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler
+                                           Weights are fetched from numz/SeedVR2_comfyUI
+                                           (Apache-2.0), which is what README's setup
+                                           resolves to; ByteDance's originals carry the
+                                           same terms.
+                                           https://huggingface.co/numz/SeedVR2_comfyUI
+                                           https://huggingface.co/ByteDance-Seed/SeedVR2-3B
+
+================================================================================
+Footage
+================================================================================
+
+No code licence covers video. The source clip and any renders produced by this
+pipeline are not part of this repository and are not licensed by LICENSE.
+
+Renders are AI-reconstructed, not recovered. See the terms of use in
+CONTRIBUTING.md.

@@ -1,0 +1,58 @@
+# --- credentials: never commit ---
+*.key
+*.pem
+.env
+.env.*
+runpod.toml
+**/config.toml
+
+# --- media: too large for git ---
+*.mp4
+*.mkv
+*.mov
+*.avi
+*.png
+*.jpg
+*.jpeg
+*.trf
+work/
+out/
+frames_*/
+
+# --- models ---
+models/
+checkpoints/
+*.safetensors
+*.pth
+*.pt
+*.gguf
+
+# --- python ---
+.venv/
+venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# --- os / editor ---
+.DS_Store
+Thumbs.db
+.vscode/
+*.swp
+
+# symlinked venvs too (trailing slash only matches real dirs)
+.venv
+venv
+
+# --- local media (kept on disk, never committed) ---
+# NB: excluding a DIRECTORY cannot be undone by a later negation - git never descends
+# into an excluded directory, so `masters/` + `!masters/README.md` silently ignores the
+# README too. Exclude the contents with /* so the negation can apply.
+input/
+masters/*
+!masters/README.md
+experiments/*
+!experiments/README.md
+
+# --- claude code: local overrides are per-machine ---
+.claude/settings.local.json

@@ -1,0 +1,119 @@
+#!/bin/bash
+# ============================================================================
+# SeedVR2 upscale - RunPod / cloud GPU
+#
+# Input : full_169.mp4  312x176, 1480 frames  (~104s, the whole clip)
+#         test_15s.mp4  312x176, 214 frames   (~15s, for a cheap first run)
+#         Both are already stabilised and cropped to 16:9, with no pre-filter.
+#
+# Output: sr_out_<res>.mp4 - upscaled only. Timing restore, grade and the
+#         selective 60fps pass are done locally afterwards.
+#
+# Usage:  bash run_on_pod.sh 720            # full clip at 720
+#         bash run_on_pod.sh 720 test       # 15s test first - DO THIS ONE FIRST
+#         bash run_on_pod.sh 1080           # if 720 looks good and you're curious
+# ============================================================================
+set -euo pipefail
+RES="${1:-720}"
+MODE="${2:-full}"
+case "$MODE" in
+  test|full) ;;
+  *) echo "!! unknown mode '$MODE' - expected 'test' or 'full'. Refusing to guess, since"
+     echo "   the wrong guess is the chargeable full render."; exit 1 ;;
+esac
+HERE="$(cd "$(dirname "$0")" && pwd)"
+
+if [ "$MODE" = "test" ]; then
+  IN="$HERE/test_15s.mp4";  OUT="$HERE/sr_test_${RES}.mp4"
+else
+  IN="$HERE/full_169.mp4";  OUT="$HERE/sr_out_${RES}.mp4"
+fi
+[ -f "$IN" ] || { echo "ERROR: $IN not found - upload it to this directory first"; exit 1; }
+
+echo "### GPU ###"
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+VRAM=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -1)
+# A non-integer here (nvidia-smi emits [N/A] on some virtualised GPUs) would make the
+# comparisons below error inside an `if`, which set -e does not catch, silently
+# selecting the fp8 CPU-offload path on a card that does not need it.
+[[ "$VRAM" =~ ^[0-9]+$ ]] || { echo "!! could not read VRAM, got: '$VRAM'"; exit 1; }
+
+echo "### system deps ###"
+apt-get update -qq >/dev/null 2>&1 || true
+apt-get install -y -qq ffmpeg git >/dev/null 2>&1 || true
+
+echo "### SeedVR2 ###"
+cd /workspace
+[ -d SeedVR2 ] || git clone --depth 1 https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler.git SeedVR2
+cd SeedVR2
+
+# IMPORTANT: SeedVR2's requirements.txt lists bare "torch" and "torchvision".
+# Installing those on a RunPod PyTorch image can replace the pod's CUDA-matched
+# build with a generic one and silently break GPU support. Strip them out and
+# keep whatever torch the image already ships.
+python -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)" 2>/dev/null || {
+  echo "!! no working CUDA torch found - install one matching this pod's CUDA before continuing"
+  echo "   e.g. pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124"
+  exit 1
+}
+[ -f requirements.txt ] || { echo "!! requirements.txt missing in $(pwd)"; exit 1; }
+# grep -v exits 1 when it selects nothing, which set -e would treat as fatal
+grep -vE '^(torch|torchvision)([=<>].*)?$' requirements.txt > /tmp/req_noTorch.txt || true
+pip install -q -r /tmp/req_noTorch.txt
+python -c "import torch; print(f'  torch {torch.__version__}  cuda={torch.cuda.is_available()}  {torch.cuda.get_device_name(0)}')"
+
+# With plenty of VRAM there is no need to offload to CPU, which is exactly what
+# made this slow on a 16GB card. Use fp16 weights and a wider temporal window.
+if [ "$VRAM" -ge 40000 ]; then
+  MODEL="seedvr2_ema_3b_fp16.safetensors"
+  EXTRA="--batch_size 33 --temporal_overlap 5"
+  echo "### ${VRAM}MB VRAM -> fp16, batch 33, no offloading ###"
+elif [ "$VRAM" -ge 22000 ]; then
+  MODEL="seedvr2_ema_3b_fp16.safetensors"
+  EXTRA="--batch_size 17 --temporal_overlap 3"
+  echo "### ${VRAM}MB VRAM -> fp16, batch 17, no offloading ###"
+else
+  MODEL="seedvr2_ema_3b_fp8_e4m3fn.safetensors"
+  EXTRA="--batch_size 17 --temporal_overlap 3 --blocks_to_swap 16 --dit_offload_device cpu --vae_offload_device cpu"
+  echo "### ${VRAM}MB VRAM -> fp8 with offloading (same as the local run) ###"
+fi
+
+echo "### running: $MODE at resolution $RES ###"
+time python inference_cli.py "$IN" \
+  --output "$OUT" \
+  --dit_model "$MODEL" \
+  --resolution "$RES" \
+  --chunk_size 370 \
+  --cache_dit --cache_vae \
+  --color_correction wavelet \
+  --video_backend ffmpeg \
+  $EXTRA
+
+echo "### result ###"
+if [ ! -f "$OUT" ]; then echo "!! no output produced - inference failed"; exit 1; fi
+ffprobe -v error -select_streams v:0 -show_entries stream=width,height,nb_frames -of csv=p=0 "$OUT"
+# Compare against the input exactly. A slack threshold hid the very failure this
+# check exists for: a run short by 80 frames (>5s) still passed.
+count_frames() {
+  local n
+  n=$(ffprobe -v error -select_streams v:0 -show_entries stream=nb_frames -of csv=p=0 "$1")
+  if ! [ "$n" -eq "$n" ] 2>/dev/null; then
+    n=$(ffprobe -v error -select_streams v:0 -count_packets \
+        -show_entries stream=nb_read_packets -of csv=p=0 "$1")
+  fi
+  if ! [ "${n:-0}" -gt 0 ] 2>/dev/null; then
+    echo "!! could not determine frame count for $1" >&2
+    return 1
+  fi
+  echo "$n"
+}
+IN_N=$(count_frames "$IN")
+OUT_N=$(count_frames "$OUT")
+if [ "$OUT_N" -ne "$IN_N" ]; then
+  echo "!! frame count mismatch: input $IN_N, output $OUT_N. Inference did not complete."
+  exit 1
+fi
+echo "frame check OK: $OUT_N frames, matching input"
+ls -lh "$OUT"
+echo
+echo "Download $(basename "$OUT") — then TERMINATE the pod (not just stop it)."

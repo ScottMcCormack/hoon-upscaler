@@ -64,6 +64,11 @@ Other dependencies — no copyleft obligation for this project
                                            do not. No copyleft obligation arises
                                            from SeedVR2.
                                            https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler
+                                           Weights are fetched from numz/SeedVR2_comfyUI
+                                           (Apache-2.0), which is what README's setup
+                                           resolves to; ByteDance's originals carry the
+                                           same terms.
+                                           https://huggingface.co/numz/SeedVR2_comfyUI
                                            https://huggingface.co/ByteDance-Seed/SeedVR2-3B
 
 ================================================================================

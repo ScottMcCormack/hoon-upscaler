@@ -113,6 +113,13 @@ Produces `MyClip_lumafix_14fps.mp4`, `_14fps_ungraded.mp4` and `_lumafix_K5.mp4`
 | `pipeline/selective_interp.py` | Interpolates normal gaps, holds through camera stalls |
 | `pipeline/reframe_src.py` | Solves a deadzone virtual camera from YOLO detections |
 | `pipeline/detect_car.py` | Per-frame subject detection (for tracked reframing) |
+
+The last two are an **experimental tracked-reframing path, not part of the pipeline above**
+and not runnable as shipped. Both operate in "STABFIRST" space — a 1408×1152 intermediate
+(4× the source, then a centred 1.12× crop) that no step in this repository produces. The
+constants in `reframe_src.py` are hardcoded to that geometry, and `detect_car.py` now
+records the space it detected in so a mismatch fails loudly rather than silently solving
+in the wrong coordinates. Producing the STABFIRST intermediate is left undocumented.
 | `cloud/run_on_pod.sh` | Provision-and-run on a rented GPU |
 
 ## Renting a GPU

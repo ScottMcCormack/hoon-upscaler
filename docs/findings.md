@@ -41,6 +41,42 @@ finds the other.
 **Metrics that were reliable:** frame counts, timing-gap analysis, boundary alignment,
 VRAM/throughput, file integrity. All objectively defined.
 
+## The seventh metric, which worked — and the control that made it trustworthy
+
+`tools/stall_discontinuity.py`. Built to answer whether the selective pass's 3-frame
+cross-dissolve still earns its place now that stalls are held by repeated frames rather
+than by interpolation across a gap.
+
+**Why this one behaves where six did not.** The failures all went looking for an artifact
+whose *location was unknown* — somewhere in the frame, somewhere in the clip — and found
+sharpness instead. A stall's exit time is known in advance, from the source timestamps.
+There is nothing to search for; the only question is whether the frame-to-frame change at
+that known instant exceeds the clip's own ordinary motion. That is boundary alignment,
+already on the reliable list.
+
+**The null control is not optional, and it reversed the answer.** A max-over-window
+divided by a median exceeds 1 by construction, so a raw ratio always looks like a finding.
+Measured on a 190-frame slice, four stall exits:
+
+| variant | baseline | observed | null median | percentile |
+|---|---|---|---|---|
+| with the ease | 3.0992 | 1.10 | 1.44 | 22nd |
+| without | 3.0791 | 1.44 | 1.42 | **53rd** |
+
+Read alone, `1.10` against `1.44` says the un-eased version is visibly worse. Against 400
+windows placed anywhere else in the same clip, `1.44` is *exactly ordinary* — the 53rd
+percentile. **There is no discontinuity at the un-eased stall exits to fix.** What the ease
+does is make them smoother than the surrounding footage (22nd percentile), which is a
+stylistic choice rather than a correction. It also did nothing at two of the four exits:
+1.28 and 1.03 in both variants.
+
+Without the control this would have been reported as a defect. That is precisely how the
+first six went wrong, one step earlier in the process.
+
+**What it does not do:** say whether a discontinuity is visible. A step twice the size of
+ordinary motion may be imperceptible. Use it to find out whether there is anything worth
+looking at, then look.
+
 ## Models
 
 | Model | Result |

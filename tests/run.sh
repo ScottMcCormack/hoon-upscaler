@@ -136,6 +136,14 @@ PY
     env DETECTIONS="$W/wrong_space.json" python "$REPO/pipeline/reframe_src.py" 860 t "$SRC3"
   assert_stderr_matches "guards: reframe_src rejects an unusable source geometry" "inverse transform assumes" \
     env DETECTIONS="$W/empty.json" python "$REPO/pipeline/reframe_src.py" 860 t "$SRC3"
+
+  # The discontinuity tool must keep running and must refuse a clip with no stalls,
+  # rather than dividing by an empty baseline.
+  NOSTALL="$W/nostall.mp4"
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=s=64x36:r=15:d=2" \
+    -frames:v 30 -c:v libx264 -crf 20 -pix_fmt yuv420p "$NOSTALL"
+  assert_stderr_matches "guards: stall_discontinuity refuses a clip with no stalls" "no gaps over" \
+    python "$REPO/tools/stall_discontinuity.py" "$NOSTALL" "$NOSTALL"
 fi
 
 # ---------------------------------------------------------------------------

@@ -114,6 +114,7 @@ Produces `MyClip_lumafix_14fps.mp4`, `_14fps_ungraded.mp4` and `_lumafix_K5.mp4`
 | `pipeline/reframe_src.py` | Solves a deadzone virtual camera from YOLO detections |
 | `pipeline/detect_car.py` | Per-frame subject detection (for tracked reframing) |
 | `cloud/run_on_pod.sh` | Provision-and-run on a rented GPU |
+| `tools/stall_discontinuity.py` | Scores how abrupt each stall exit is, against the clip's own motion |
 
 `reframe_src.py` and `detect_car.py` are an **experimental tracked-reframing path, not part
 of the pipeline above**

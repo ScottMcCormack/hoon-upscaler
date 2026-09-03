@@ -61,9 +61,15 @@ ffprobe -v error -select_streams v:0 -show_entries frame=pts_time -of csv=p=0 "$
 rm -f "$W"/f_*.png
 ffmpeg -y -v error -i "$W/stab.mkv" "$W/f_%06d.png"
 echo "    $(ls "$W"/f_*.png | wc -l) frames"
-WORKDIR="$W" python - <<'PY'
+WORKDIR="$W" REPO="$REPO" python - <<'PY'
 import os
+import sys
+from fractions import Fraction
 from pathlib import Path
+
+sys.path.insert(0, os.path.join(os.environ["REPO"], "pipeline"))
+import timing
+
 w = Path(os.environ["WORKDIR"])
 pts = [float(x) for x in w.joinpath("pts.txt").read_text().split() if x.strip()]
 fr = sorted(w.glob("f_*.png"))
@@ -100,24 +106,30 @@ term = sorted(durs)[len(durs) // 2] if durs else 1 / 15
 # 66.7ms cadence comes out as 80/40/80/40. Repeats have no such problem: this camera
 # only ever stalls for whole multiples of a frame period, so the same playback is
 # exactly representable at the base rate.
-base = 1.0 / min(durs) if durs else 15.0
-worst = max(abs(d * base - round(d * base)) for d in durs + [term])
+base = timing.base_rate(durs) if durs else Fraction(15)
+reps, worst = timing.repeats(durs, term, base)
 if worst > 0.02:
     raise SystemExit(
-        f"!! source gaps are not whole multiples of {1000/base:.1f}ms (worst offender is "
-        f"{worst:.3f} of a frame out). This footage cannot be expressed exactly at a "
-        f"constant rate, and the concat-duration alternative would quantise it to 40ms. "
-        f"Handle this source explicitly rather than silently approximating it."
+        f"!! source gaps are not whole multiples of {1000/float(base):.1f}ms (worst "
+        f"offender is {worst:.3f} of a frame out). This footage cannot be expressed "
+        f"exactly at a constant rate, and the concat-duration alternative would quantise "
+        f"it to 40ms. Handle this source explicitly rather than approximating it."
     )
 
-reps = [max(1, round(d * base)) for d in durs] + [max(1, round(term * base))]
 lines = []
 for f, r in zip(fr, reps):
     lines += [f"file '{f.name}'"] * r
 w.joinpath("concat.txt").write_text("\n".join(lines) + "\n")
-w.joinpath("base_fps.txt").write_text(f"{base:.6f}\n")
+# An exact rational, not a decimal. 1/0.066666 is 15.000150002, and ffmpeg's -r takes
+# that literally: the error accumulates to about a millisecond over a full clip.
+w.joinpath("base_fps.txt").write_text(f"{base.numerator}/{base.denominator}\n")
+# The span the VIDEO actually covers, from timestamps already checked for monotonicity
+# and representability. Not the container duration: that is max(video, audio), so a
+# source whose audio runs past its video would inflate the interpolation target and
+# produce a frozen tail.
+w.joinpath("span.txt").write_text(f"{sum(durs) + term:.9f}\n")
 held = sum(r - 1 for r in reps)
-print(f"    concat {n} source frames -> {len(lines)} at {base:.3f}fps "
+print(f"    concat {n} source frames -> {len(lines)} at {base}fps "
       f"({held} held), spanning {sum(durs)+term:.2f}s")
 PY
 
@@ -139,9 +151,9 @@ echo "### [4/5] 60fps interpolation"
 # Clone a few frames onto the end so the filter has somewhere to run to, then trim back
 # to the length the SOURCE says we should have. Deriving the target from the source
 # rather than from the render keeps this independent of the concat timebase (issue #2).
-SRC_DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$SRC_ORIG")
-EXPECT60=$(python -c "print(round($SRC_DUR * 60))")
-echo "    target $EXPECT60 frames (source spans ${SRC_DUR}s)"
+SRC_SPAN=$(cat "$W/span.txt")
+EXPECT60=$(python -c "print(round($SRC_SPAN * 60))")
+echo "    target $EXPECT60 frames (video spans ${SRC_SPAN}s)"
 
 # Interpolate from the GRADED render — the selective pass pulls held frames from it, and
 # mixing graded with ungraded puts a ~10-17 luma step at every hold boundary.
@@ -150,10 +162,23 @@ ffmpeg -y -v error -i "$OUT_DIR/${TAG}_lumafix_14fps.mp4" \
   -c:v libx264 -preset fast -crf 12 -an "$W/i60.mp4"
 I60_N=$(ffprobe -v error -select_streams v:0 -count_packets -show_entries stream=nb_read_packets -of csv=p=0 "$W/i60.mp4")
 echo "    interpolated $I60_N frames"
+if [ "$I60_N" -ne "$EXPECT60" ]; then
+  echo "!! interpolation produced $I60_N frames, expected $EXPECT60. Publishing this would"
+  echo "   be the truncated deliverable this step exists to prevent. If tpad is too small"
+  echo "   for the tail, raise stop=8."
+  exit 1
+fi
 
-echo "### [5/5] selective pass (hold gaps >150ms, ease 3)"
+# Ease is off. A cross-dissolve out of a stall blends two frames separated by the
+# LARGEST gap in the clip - 267ms against a normal 67ms - so it blends the maximum
+# displacement anywhere in the footage, and the result ghosts. Measured: edge energy
+# drops 5-8% on exactly the blended frames and is unchanged everywhere else. The
+# discontinuity it was smoothing is not anomalous to begin with (53rd percentile of
+# ordinary motion), so it paid that cost for nothing. Pass a non-zero value here to
+# re-enable it; docs/findings.md has the numbers.
+echo "### [5/5] selective pass (hold gaps >150ms, no ease)"
 python "$HERE/selective_interp.py" "$W/i60.mp4" "$OUT_DIR/${TAG}_lumafix_14fps.mp4" \
-  "$W/pts.txt" "$W/sel.mkv" 150 3 2>&1 | tail -2
+  "$W/pts.txt" "$W/sel.mkv" 150 0 2>&1 | tail -2
 ffmpeg -y -v error -i "$W/sel.mkv" -i "$SRC_ORIG" -map 0:v:0 -map 1:a:0? \
   -c:v libx264 -preset medium -crf 18 -pix_fmt yuv420p -c:a aac -b:a 128k \
   -movflags +faststart "$OUT_DIR/${TAG}_lumafix_K5.mp4"

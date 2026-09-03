@@ -28,10 +28,21 @@ assert_exits_nonzero() {  # name description command...
   else ok "$name"; fi
 }
 
+# The command must FAIL *and* explain itself. Both halves matter: an earlier version of
+# this helper swallowed the exit status with `|| true`, so a command that printed the
+# right message and then carried on regardless would have passed every guard test.
 assert_stderr_matches() {  # name pattern command...
   local name="$1" pat="$2"; shift 2
-  local out; out="$("$@" 2>&1 || true)"
-  case "$out" in *"$pat"*) ok "$name" ;; *) bad "$name" "no '$pat' in: $(printf '%s' "$out" | tail -1)" ;; esac
+  local out status
+  out="$("$@" 2>&1)"; status=$?
+  if [ "$status" -eq 0 ]; then
+    bad "$name" "exited 0 — it printed a message but did not refuse"
+    return
+  fi
+  case "$out" in
+    *"$pat"*) ok "$name" ;;
+    *) bad "$name" "exit $status, but no '$pat' in: $(printf '%s' "$out" | tail -1)" ;;
+  esac
 }
 
 # --- fixtures ---------------------------------------------------------------

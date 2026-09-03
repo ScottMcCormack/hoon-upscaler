@@ -147,6 +147,55 @@ PY
 fi
 
 # ---------------------------------------------------------------------------
+# Frame-rate derivation. Unit-tested rather than exercised through the pipeline,
+# because the failure it guards is drift: it is invisible over a short fixture and
+# only showed up after a 55-minute full-length render.
+# ---------------------------------------------------------------------------
+echo
+echo "timing unit"
+
+if want timing; then
+  RATE_OUT="$(python - "$REPO" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1] + "/pipeline")
+import timing
+cases = [
+    ("exact-15",  [1/15] * 5,             "15"),
+    ("ffprobe6dp",[0.066666] * 5,         "15"),      # 1/0.066666 = 15.000150002
+    ("ntsc",      [1001/15000] * 5,       "15000/1001"),
+    ("with-stall",[0.066666, 0.266666],   "15"),
+]
+for name, gaps, want in cases:
+    got = str(timing.base_rate(gaps))
+    print(f"{name} {'OK' if got == want else 'BAD'} {got} {want}")
+# drift over a full clip length must vanish
+r = float(timing.base_rate([0.066666] * 5))
+drift_ms = 1556 * abs(1 / r - 1 / 15) * 1000
+print(f"drift {'OK' if drift_ms < 0.001 else 'BAD'} {drift_ms:.6f} 0")
+
+# Timing that no constant rate can express must be refused, not rounded. The
+# pipeline's whole approach rests on gaps being whole multiples of one frame period.
+for nm, gaps, should_refuse in [
+    ("accepts-nokia",   [0.066666, 0.133333, 0.266666, 0.066666], False),
+    ("refuses-50/70",   [0.050, 0.070, 0.050, 0.070],             True),
+    ("refuses-40/65/90",[0.040, 0.065, 0.090],                    True),
+    ("accepts-ntsc",    [2 * 1001 / 30000] * 4,                   False),
+]:
+    _, worst = timing.repeats(gaps, gaps[0], timing.base_rate(gaps))
+    refused = worst > 0.02
+    print(f"{nm} {'OK' if refused == should_refuse else 'BAD'} "
+          f"{'refused' if refused else 'accepted'} "
+          f"{'refused' if should_refuse else 'accepted'}")
+PY
+)"
+  while read -r name verdict got want; do
+    [ -z "$name" ] && continue
+    if [ "$verdict" = "OK" ]; then ok "timing unit: $name -> $got"
+    else bad "timing unit: $name" "got $got, wanted $want"; fi
+  done <<< "$RATE_OUT"
+fi
+
+# ---------------------------------------------------------------------------
 # Repository invariants that have silently broken before.
 # ---------------------------------------------------------------------------
 echo
@@ -162,6 +211,21 @@ if want repository; then
       ok "repository: $f is not ignored"
     fi
   done
+  # The core requirements must not drag in the AGPL detection stack. NOTICE tells
+  # readers that Apache-2.0 does not cover detect_car.py's dependency chain; that
+  # promise breaks if a plain `pip install -r requirements.txt` installs ultralytics.
+  if grep -qiE '^(ultralytics|torch)' "$REPO/requirements.txt" 2>/dev/null; then
+    bad "repository: core requirements stay free of the AGPL stack" \
+        "requirements.txt pulls in torch/ultralytics"
+  else
+    ok "repository: core requirements stay free of the AGPL stack"
+  fi
+  if grep -q 'requirements.txt' "$REPO/requirements-reframe.txt" 2>/dev/null; then
+    ok "repository: reframe requirements build on the core file"
+  else
+    bad "repository: reframe requirements build on the core file" "missing -r requirements.txt"
+  fi
+
   # ...while the media itself must stay ignored.
   for f in masters/sr_out_1080.mp4 out/x.mp4 input/y.mp4 experiments/z.mp4; do
     if git -C "$REPO" check-ignore -q "$f" 2>/dev/null; then

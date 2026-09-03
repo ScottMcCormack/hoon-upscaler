@@ -39,9 +39,20 @@ Steps 5-8 are automated by `pipeline/finish.sh`.
 ```bash
 git clone https://github.com/ScottMcCormack/hoon-upscaler.git
 cd hoon-upscaler
-python3 -m venv .venv && source .venv/bin/activate
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Python 3.12, not 3.14 — neither numpy nor opencv ships a cp314 wheel yet.
+
+`requirements.txt` is the core pipeline only. The experimental reframing path needs
+`requirements-reframe.txt`, which pulls in `ultralytics` (**AGPL-3.0** — see
+[NOTICE](NOTICE)) and torch. On Blackwell cards install torch from the cu130 index first,
+since stock builds carry no `sm_120` kernels:
+
+```bash
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
-pip install opencv-contrib-python-headless numpy ultralytics
+pip install -r requirements-reframe.txt
 ```
 
 The cu130 index matters on Blackwell cards (RTX 50-series) — stock builds have no

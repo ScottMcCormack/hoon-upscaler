@@ -48,6 +48,31 @@ def timestamps(path):
     return p - p[0]
 
 
+def edge_energy(path):
+    """Mean gradient magnitude per frame - a sharpness proxy.
+
+    Needed because frame-to-frame change alone cannot tell smooth continuity from
+    ghosting. A cross-dissolve lowers the delta (it looks smoother) while overlaying
+    two displaced copies of the scene, so a delta-only score rates the artifact as an
+    improvement. Edge energy falls when frames are blended, so the two together
+    separate the cases.
+    """
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        sys.exit(f"cannot open {path}")
+    out = []
+    while True:
+        ok, fr = cap.read()
+        if not ok:
+            break
+        g = cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        gx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3)
+        out.append(float(np.mean(np.sqrt(gx * gx + gy * gy))))
+    cap.release()
+    return np.array(out)
+
+
 def frame_deltas(path):
     """Mean absolute luma change between consecutive frames."""
     cap = cv2.VideoCapture(path)
@@ -81,7 +106,8 @@ def main():
     print(f"{len(exits)} stall exits, at output frames {exits}\n")
 
     rng = np.random.default_rng(0)
-    print(f"{'variant':<28} {'baseline':>9} {'observed':>9} {'null med':>9} {'pctile':>7}")
+    print(f"{'variant':<28} {'baseline':>9} {'observed':>9} {'null med':>9} {'pctile':>7} "
+          f"{'sharp@exit':>9}")
     for path in variants:
         d = frame_deltas(path)
         near = np.zeros(len(d), bool)
@@ -91,21 +117,56 @@ def main():
             sys.exit(f"{path}: too few frames away from stalls to form a baseline")
 
         baseline = float(np.median(d[~near]))
+        if baseline <= 0:
+            sys.exit(f"{path}: no ordinary motion away from the stalls (median frame change "
+                     f"is {baseline}), so there is nothing to compare a stall exit against. "
+                     f"This clip is too static for the measure to mean anything.")
+
         def ratio(i):
             return float(d[max(0, i - 5):min(len(d), i + 3)].max()) / baseline
 
         observed = float(np.mean([ratio(e) for e in exits]))
-        pool = [i for i in range(6, len(d) - 4) if not near[i]]
-        null = np.array([ratio(i) for i in rng.choice(pool, min(NULL_SAMPLES, len(pool)), replace=False)])
+
+        # The null must be the SAME statistic as the observed value. Observed is a mean
+        # over len(exits) windows; a distribution of single-window ratios has a wider
+        # spread, so comparing against it understates how unusual the observation is.
+        # Sample means of the same size instead.
+        #
+        # Candidates also need their whole window clear of a stall neighbourhood, not
+        # just their centre - an eight-frame slice centred five frames away still
+        # overlaps one.
+        k = len(exits)
+        pool = [i for i in range(6, len(d) - 4)
+                if not near[max(0, i - 5):min(len(d), i + 3)].any()]
+        if len(pool) < k:
+            sys.exit(f"{path}: only {len(pool)} windows clear of a stall, need at least {k}")
+        null = np.array([
+            float(np.mean([ratio(i) for i in rng.choice(pool, k, replace=False)]))
+            for _ in range(NULL_SAMPLES)
+        ])
         pctile = float((null < observed).mean() * 100)
 
-        name = path.rsplit("/", 1)[-1]
-        print(f"{name:<28} {baseline:9.4f} {observed:9.2f} {float(np.median(null)):9.2f} {pctile:6.0f}%")
-        print(f"{'':<28} per-exit: {[round(ratio(e), 2) for e in exits]}")
+        # Sharpness at the exits against sharpness elsewhere. Below 1 means frames are
+        # being blended there - smoother deltas bought with a ghost.
+        e = edge_energy(path)
+        at, away = np.zeros(len(e), bool), None
+        for x in exits:
+            at[max(0, x - 4):min(len(e), x + 1)] = True
+        away = ~at
+        sharp_ratio = float(np.mean(e[at]) / np.mean(e[away])) if away.sum() else float("nan")
 
-    print("\nA percentile near 50 means stall exits are indistinguishable from ordinary\n"
-          "motion - there is no discontinuity to fix. Well above 50 means they are more\n"
-          "abrupt than the rest of the clip; well below means they are smoother.")
+        name = path.rsplit("/", 1)[-1]
+        print(f"{name:<28} {baseline:9.4f} {observed:9.2f} {float(np.median(null)):9.2f} "
+              f"{pctile:6.0f}% {sharp_ratio:8.3f}")
+        print(f"{'':<28} per-exit: {[round(ratio(x), 2) for x in exits]}")
+
+    print("\nabruptness percentile: near 50 means stall exits are indistinguishable from\n"
+          "ordinary motion - nothing to fix. Well above 50 means more abrupt than the rest\n"
+          "of the clip; well below means smoother.\n\n"
+          "sharp@exit: edge energy at the exits over edge energy elsewhere. Below ~0.98\n"
+          "means frames are being blended there, and a low abruptness percentile is then\n"
+          "measuring a ghost rather than a graceful transition. Read the two together:\n"
+          "smooth AND sharp is good; smooth AND soft is a dissolve smearing the picture.")
 
 
 if __name__ == "__main__":

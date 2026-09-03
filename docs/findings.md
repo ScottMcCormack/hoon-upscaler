@@ -77,6 +77,30 @@ first six went wrong, one step earlier in the process.
 ordinary motion may be imperceptible. Use it to find out whether there is anything worth
 looking at, then look.
 
+### The metric was wrong twice more before it settled
+
+Recorded because the pattern matters more than the fixes.
+
+**It had the sign backwards.** It scored the cross-dissolve variant as *smoother* and I
+read that as mildly good. Smoothness bought by blending two displaced frames **is** the
+ghost — a delta-only measure structurally cannot tell graceful continuity from a double
+exposure. Scott saw the smear by eye; the number had rated it an improvement. An
+`edge_energy` term now reports sharpness alongside abruptness, and the two together
+separate the cases: smooth and sharp is good, smooth and soft is a dissolve smearing the
+picture.
+
+**The null control compared the wrong statistic.** The observed value is a mean over N
+stall exits, but each null sample was a *single* window ratio. A mean of N has a narrower
+spread than one sample, so the percentile was biased — and null candidates were only
+checked at their centre, letting an eight-frame window overlap a stall it was supposed to
+avoid. Sampling means of N clear windows moved the readings from 22/74/93 to
+**8/60/100**. Same direction, sharper separation, and only now measuring what it claims.
+
+The lesson is narrow and repeatable: **the control has to be the same statistic as the
+observation.** Every wrong conclusion in this project's measurement history — including the
+byte-identical verification that hid two cancelling defects — came from comparing against
+the wrong baseline rather than from a bad idea.
+
 ## Models
 
 | Model | Result |

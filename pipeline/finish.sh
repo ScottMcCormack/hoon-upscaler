@@ -1,9 +1,11 @@
 #!/bin/bash
 # Finishing pipeline: luma fix -> source-cadence timing -> grade -> selective 60fps.
 #
-# "Source cadence" not "true timing": the concat demuxer snaps each frame's duration to a
-# 40ms grid, so stalls survive and the total span is preserved, but individual durations
-# are within ~13ms rather than exact. See issue #2.
+# Timing is exact. Each source frame is placed at its own timestamp, by expressing the
+# cadence as a constant rate with held frames repeated rather than as concat `duration`
+# directives - those get snapped to the demuxer's 40ms grid, which used to leave every
+# frame within ~13ms of where it belonged. Verified at zero error across all 1480 frames
+# of the reference clip.
 #
 # Takes the raw output of a SeedVR2 upscale and produces watchable deliverables.
 # The ORIGINAL source is needed for two things: its real per-frame timestamps, and
@@ -169,16 +171,14 @@ if [ "$I60_N" -ne "$EXPECT60" ]; then
   exit 1
 fi
 
-# Ease is off. A cross-dissolve out of a stall blends two frames separated by the
-# LARGEST gap in the clip - 267ms against a normal 67ms - so it blends the maximum
-# displacement anywhere in the footage, and the result ghosts. Measured: edge energy
-# drops 5-8% on exactly the blended frames and is unchanged everywhere else. The
-# discontinuity it was smoothing is not anomalous to begin with (53rd percentile of
-# ordinary motion), so it paid that cost for nothing. Pass a non-zero value here to
-# re-enable it; docs/findings.md has the numbers.
-echo "### [5/5] selective pass (hold gaps >150ms, no ease)"
+# Ease stays at 3, unchanged. Whether to keep the cross-dissolve is an open question
+# that belongs to its own change, not to a timing fix: it blends two frames separated by
+# the largest gap in the clip, which costs 5-8% edge energy on exactly those frames, but
+# the alternative is a visible cut. docs/findings.md carries the measurements; the call
+# is one for the eye. Pass 0 here to disable it.
+echo "### [5/5] selective pass (hold gaps >150ms, ease 3)"
 python "$HERE/selective_interp.py" "$W/i60.mp4" "$OUT_DIR/${TAG}_lumafix_14fps.mp4" \
-  "$W/pts.txt" "$W/sel.mkv" 150 0 2>&1 | tail -2
+  "$W/pts.txt" "$W/sel.mkv" 150 3 2>&1 | tail -2
 ffmpeg -y -v error -i "$W/sel.mkv" -i "$SRC_ORIG" -map 0:v:0 -map 1:a:0? \
   -c:v libx264 -preset medium -crf 18 -pix_fmt yuv420p -c:a aac -b:a 128k \
   -movflags +faststart "$OUT_DIR/${TAG}_lumafix_K5.mp4"

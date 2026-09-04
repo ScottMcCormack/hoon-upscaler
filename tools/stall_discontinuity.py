@@ -110,6 +110,16 @@ def main():
           f"{'sharp@exit':>9}")
     for path in variants:
         d = frame_deltas(path)
+
+        # Every exit must actually exist in this variant. A truncated render - the
+        # pre-#3 output is exactly the thing someone would compare against - would
+        # otherwise score a window that sits before the exit, or take max() of an empty
+        # slice, and report a number as though it meant something.
+        if len(d) <= max(exits):
+            sys.exit(f"{path}: ends at frame {len(d)}, before the last stall exit at "
+                     f"{max(exits)}. This variant is shorter than the source, so its "
+                     f"exits cannot be scored against it - compare a full-length render.")
+
         near = np.zeros(len(d), bool)
         for e in exits:
             near[max(0, e - 6):min(len(d), e + 4)] = True

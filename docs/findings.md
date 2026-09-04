@@ -54,24 +54,28 @@ There is nothing to search for; the only question is whether the frame-to-frame 
 that known instant exceeds the clip's own ordinary motion. That is boundary alignment,
 already on the reliable list.
 
-**The null control is not optional, and it reversed the answer.** A max-over-window
-divided by a median exceeds 1 by construction, so a raw ratio always looks like a finding.
-Measured on a 190-frame slice, four stall exits:
+**The null control is not optional.** A max-over-window divided by a median exceeds 1 by
+construction, so a raw ratio always looks like a finding; only comparing it against the
+same statistic computed away from the stalls says whether it is elevated.
 
-| variant | baseline | observed | null median | percentile |
-|---|---|---|---|---|
-| with the ease | 3.0992 | 1.10 | 1.44 | 22nd |
-| without | 3.0791 | 1.44 | 1.42 | **53rd** |
+Current readings, from a fresh run on the 190-frame slice with four stall exits:
 
-Read alone, `1.10` against `1.44` says the un-eased version is visibly worse. Against 400
-windows placed anywhere else in the same clip, `1.44` is *exactly ordinary* — the 53rd
-percentile. **There is no discontinuity at the un-eased stall exits to fix.** What the ease
-does is make them smoother than the surrounding footage (22nd percentile), which is a
-stylistic choice rather than a correction. It also did nothing at two of the four exits:
-1.28 and 1.03 in both variants.
+| variant | baseline | observed | null median | percentile | sharp@exit |
+|---|---|---|---|---|---|
+| ease 3 (cross-dissolve) | 3.0992 | 1.10 | 1.50 | **8th** | 0.920 |
+| ease 1 | 3.1012 | 1.66 | 1.54 | 60th | 0.977 |
+| ease 0 (hold, then cut) | 3.0988 | 3.35 | 1.48 | **100th** | 1.017 |
 
-Without the control this would have been reported as a defect. That is precisely how the
-first six went wrong, one step earlier in the process.
+Read together: the dissolve makes stall exits far smoother than ordinary motion (8th
+percentile) at a cost of 8% edge energy on the blended frames; removing it makes them the
+most abrupt moments in the clip (100th) but leaves every frame sharp. That is a genuine
+trade, not a defect on either side, and which one is right is a question for the eye.
+
+**An earlier version of this table reported 22nd and 53rd percentiles and concluded there
+was no discontinuity to fix.** Both numbers were wrong, for two separate reasons, and the
+conclusion drawn from them was wrong too: the 53rd came from comparing the eased variant
+against the raw interpolated stream rather than against ease 0, and both were computed
+with a null control that compared a mean against single samples. Corrected below.
 
 **What it does not do:** say whether a discontinuity is visible. A step twice the size of
 ordinary motion may be imperceptible. Use it to find out whether there is anything worth

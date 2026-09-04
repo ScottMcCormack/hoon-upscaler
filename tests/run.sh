@@ -144,6 +144,14 @@ PY
     -frames:v 30 -c:v libx264 -crf 20 -pix_fmt yuv420p "$NOSTALL"
   assert_stderr_matches "guards: stall_discontinuity refuses a clip with no stalls" "no gaps over" \
     python "$REPO/tools/stall_discontinuity.py" "$NOSTALL" "$NOSTALL"
+
+  # A variant shorter than the source cannot have its exits scored - and a truncated
+  # render is exactly what someone would reach for when comparing against the old output.
+  TSRC="$W/tsrc.mp4"; mk_vfr_source "$TSRC" 40 5 8 20 24
+  TFULL="$W/tfull.mp4"; mk_upscaled "$TFULL" 200
+  TSHORT="$W/tshort.mp4"; mk_upscaled "$TSHORT" 30
+  assert_stderr_matches "guards: stall_discontinuity refuses a truncated variant" "shorter than the source" \
+    python "$REPO/tools/stall_discontinuity.py" "$TSRC" "$TSHORT"
 fi
 
 # ---------------------------------------------------------------------------

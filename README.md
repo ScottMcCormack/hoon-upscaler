@@ -155,6 +155,20 @@ catches a broken setup in five minutes rather than forty.
 
 Pick **Ampere or Ada** (A40, A100, L40S), not Blackwell — see `CLAUDE.md`.
 
+The runner needs two inputs beside it, neither of which is in the repo since both are
+media. Build them from the stabilised source, then upload both to the pod:
+
+```bash
+ffmpeg -i stabilised.mp4 -vf "crop=312:176:0:0" -crf 0 cloud/full_169.mp4
+ffmpeg -i cloud/full_169.mp4 -frames:v 214 -c copy    cloud/test_15s.mp4
+```
+
+Run the 15-second one first — `bash run_on_pod.sh 720 test`. It costs about $0.15 and
+catches a broken setup in five minutes instead of forty.
+
+`bash tests/cloud_pod.sh` exercises the runner against stubs before you rent anything.
+It proves the script's own logic; it cannot tell you anything about the pod image.
+
 See `cloud/run_on_pod.sh` and `docs/findings.md`.
 
 ## A note on what this produces

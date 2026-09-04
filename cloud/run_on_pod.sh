@@ -5,6 +5,11 @@
 # Input : full_169.mp4  312x176, 1480 frames  (~104s, the whole clip)
 #         test_15s.mp4  312x176, 214 frames   (~15s, for a cheap first run)
 #         Both are already stabilised and cropped to 16:9, with no pre-filter.
+#         Neither is in the repo - they are media. Make them from the stabilised
+#         source (see README "Prepare the source"), then upload both to this
+#         directory on the pod:
+#           ffmpeg -i stabilised.mp4 -vf "crop=312:176:0:0" -crf 0 full_169.mp4
+#           ffmpeg -i full_169.mp4 -frames:v 214 -c copy   test_15s.mp4
 #
 # Output: sr_out_<res>.mp4 - upscaled only. Timing restore, grade and the
 #         selective 60fps pass are done locally afterwards.

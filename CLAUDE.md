@@ -64,7 +64,8 @@ right", produce a visual comparison and ask.
   kernels for it — install with `--index-url .../whl/cu130`. Cloud Ampere/Ada cards (A40,
   A100, L40S) take stock builds; another Blackwell (RTX 5090) repeats the trap.
 - **16GB VRAM is a cliff, not a curve.** Below it ~1.3s/frame, above ~25s/frame — 19×
-  from a 25% resolution increase. An A40 48GB at $0.44/hr removes it for about $1 a job.
+  from a 25% resolution increase. An A40 48GB removes it — $0.49/hr as of Sept 2026, and
+  a measured $0.34 for the whole clip at 720 including setup.
 - **15GB system RAM.** Long clips held entirely in memory trigger the OOM killer. Use
   chunked/streaming modes; check `dmesg | grep -i oom-kill` when a process dies silently.
 - **Venvs cannot be created on `/mnt/z`** (Windows mount) — installs fail on file copies.

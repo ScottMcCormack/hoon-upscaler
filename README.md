@@ -139,9 +139,19 @@ in the wrong coordinates. Producing the STABFIRST intermediate is left undocumen
 ## Renting a GPU
 
 A 16GB card hits a hard wall above ~1021×576 output — throughput drops roughly 19× as
-model blocks swap to system RAM. An **A40 48GB** on RunPod at $0.44/hr removes it: a
-720p render went from an impractical 10 hours to 22 minutes, and 1080p became possible
-at all. Three full renders plus two model comparisons cost about $1.
+model blocks swap to system RAM. An **A40 48GB** on RunPod removes it, and 1080p becomes
+possible at all.
+
+Measured on 2026-09-04, end to end via `cloud/run_on_pod.sh`:
+
+| | frames | wall clock | throughput |
+|---|---|---|---|
+| 15s test at 720 | 214 | 5m24s | 0.68 fps |
+| full clip at 720 | 1480 | 25m11s | 0.98 fps |
+
+**$0.34 total** at $0.49/hr, including pod setup, the SeedVR2 checkout and the first-run
+model download. The test render is worth doing first regardless — it costs about $0.15 and
+catches a broken setup in five minutes rather than forty.
 
 Pick **Ampere or Ada** (A40, A100, L40S), not Blackwell — see `CLAUDE.md`.
 

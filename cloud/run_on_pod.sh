@@ -63,7 +63,18 @@ python -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)" 2
 [ -f requirements.txt ] || { echo "!! requirements.txt missing in $(pwd)"; exit 1; }
 # grep -v exits 1 when it selects nothing, which set -e would treat as fatal
 grep -vE '^(torch|torchvision)([=<>].*)?$' requirements.txt > /tmp/req_noTorch.txt || true
-pip install -q -r /tmp/req_noTorch.txt
+
+# Ubuntu 24.04 images (runpod-torch-v280 is one) mark the system Python as externally
+# managed, and PEP 668 makes pip refuse to install into it. A venv is the usual answer
+# and the wrong one here: the whole point is to install ALONGSIDE the CUDA-matched torch
+# the image already ships, and the pod is disposable anyway. Detect the marker rather
+# than passing the flag unconditionally, since older pips reject it.
+PIP_FLAGS=""
+if python -c "import os, sysconfig, sys; sys.exit(0 if os.path.exists(os.path.join(sysconfig.get_paths()['stdlib'], 'EXTERNALLY-MANAGED')) else 1)"; then
+  PIP_FLAGS="--break-system-packages"
+  echo "  (PEP 668 environment - installing with --break-system-packages)"
+fi
+pip install -q $PIP_FLAGS -r /tmp/req_noTorch.txt
 python -c "import torch; print(f'  torch {torch.__version__}  cuda={torch.cuda.is_available()}  {torch.cuda.get_device_name(0)}')"
 
 # With plenty of VRAM there is no need to offload to CPU, which is exactly what

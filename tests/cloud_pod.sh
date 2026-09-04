@@ -7,10 +7,10 @@
 # nvidia-smi reports whatever VRAM the case wants, and the inference step writes a file
 # with whatever frame count the case wants.
 #
-# What this canNOT tell you: whether SeedVR2 runs, whether the CUDA build matches the
-# pod, or how long a render takes. Those need real hardware. What it does tell you is
-# that the script's guards fire and its VRAM branches select correctly — the parts that
-# would otherwise be discovered at $0.44/hr.
+# What this canNOT tell you: anything about the environment the script lands in. The
+# stub pip is a no-op, so it sailed past the PEP 668 failure that killed the first real
+# pod run before inference even started (docs/findings.md). It proves the script's own
+# logic — branch selection, guards, the frame check — and nothing beyond that.
 #
 #   bash tests/cloud_pod.sh
 set -uo pipefail

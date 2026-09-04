@@ -149,3 +149,49 @@ Above ~65 the setting stops earning its VRAM.
 - Correlation trackers (CSRT) fail on this footage: they slide onto the smoke within
   seconds while reporting a successful lock every frame. Detection-based tracking (YOLO)
   re-decides each frame and cannot drift.
+
+## The cloud runner, first executed 2026-09-04
+
+`cloud/run_on_pod.sh` existed for months without ever being run. `tests/cloud_pod.sh` now
+drives it against stubs and catches most of what can go wrong, but the first real pod run
+found something no stub could.
+
+**PEP 668 killed it before inference.** The `runpod-torch-v280` template is Ubuntu 24.04,
+which marks the system Python externally managed, so `pip install` refuses outright:
+
+```
+error: externally-managed-environment
+```
+
+The script died there on its first ever run. A venv is the reflex fix and the wrong one:
+the point is to install *alongside* the CUDA-matched torch the image already ships, and the
+pod is disposable. It now detects the `EXTERNALLY-MANAGED` marker and adds
+`--break-system-packages` only when present, since older pips reject the flag.
+
+Worth being precise about why the stub harness missed it: the stub `pip` was a no-op, so it
+could never have surfaced this. Stubs prove the script's own logic — branch selection, the
+guards, the frame check. They cannot prove anything about the environment it lands in.
+
+**runpodctl 2.12.0 does not have `--terminate-after`.** The documented cost guard for a
+throwaway pod does not exist in this version, so there is nothing to stop a forgotten pod
+billing. Use `--wait --wait-timeout` to block until SSH answers, and arm your own watchdog.
+Also `--gpu-id` wants the `gpuId` (`NVIDIA A40`), not the `displayName` (`A40`).
+
+**SeedVR2 is not reproducible.** Re-rendering the same 1480-frame input at the same
+resolution on the same model produced a different master:
+
+```
+frames compared      1480
+identical            0
+median PSNR          39.2 dB    (min 31.1 dB)
+```
+
+Every frame differs. 39 dB is close enough that the two are probably hard to tell apart by
+eye, but they are not the same file and never will be. The cause was not isolated — a fresh
+SeedVR2 checkout, no seed is passed, and CUDA kernels need not be deterministic.
+
+The consequence matters more than the cause: **a master cannot be recreated, only kept.**
+That is exactly why `masters/` exists and why its README says every downstream choice can be
+re-run from there for free. Re-deriving one is not a fallback; it produces a different
+starting point.
+

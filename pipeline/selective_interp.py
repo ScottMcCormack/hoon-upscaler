@@ -63,26 +63,38 @@ w = int(ci.get(cv2.CAP_PROP_FRAME_WIDTH))
 h = int(ci.get(cv2.CAP_PROP_FRAME_HEIGHT))
 vw = cv2.VideoWriter(OUT, cv2.VideoWriter_fourcc(*"FFV1"), fps, (w, h))
 
-# rolling two-frame source buffer: cur = frame i, nxt = frame i+1
-cur_idx = -1
+# The source-cadence render is CFR with held frames repeated, so its frame indices are
+# not source frame indices: a 267ms stall occupies four render frames. Work out where
+# each source frame begins, so `cur` is the right image and `nxt` is the next REAL
+# frame rather than another copy of the current one - the ease dissolves into it.
+base_fps = cs.get(cv2.CAP_PROP_FPS) or 15.0
+reps = [max(1, int(round(g * base_fps))) for g in gaps]
+start = [0]
+for r in reps:
+    start.append(start[-1] + r)
+starts_at = {v: j for j, v in enumerate(start)}
+
+render_pos = -1   # index of the last render frame read (NOT the stall-relative
+                  # `pos` used below - they are different things)
+buf = {}          # source index -> frame; never holds more than the two in use
 cur = nxt = None
 
 
 def advance_to(i):
-    """Make cur = source frame i, nxt = source frame i+1."""
-    global cur_idx, cur, nxt
-    while cur_idx < i:
-        if nxt is None:
-            ok, f = cs.read()
-            if not ok:
-                break
-            cur = f
-        else:
-            cur = nxt
-        ok, nxt = cs.read()
+    """Make cur = source frame i and nxt = source frame i+1, reading forward only."""
+    global render_pos, cur, nxt
+    need = start[min(i + 1, len(start) - 1)]
+    while render_pos < need:
+        ok, f = cs.read()
         if not ok:
-            nxt = None
-        cur_idx += 1
+            break
+        render_pos += 1
+        j = starts_at.get(render_pos)
+        if j is not None and j >= i:
+            buf[j] = f
+    for j in [j for j in buf if j < i]:
+        del buf[j]
+    cur, nxt = buf.get(i), buf.get(i + 1)
 
 
 k = passed = held = eased = tail = 0

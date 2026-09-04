@@ -1,9 +1,11 @@
 #!/bin/bash
 # Finishing pipeline: luma fix -> source-cadence timing -> grade -> selective 60fps.
 #
-# "Source cadence" not "true timing": the concat demuxer snaps each frame's duration to a
-# 40ms grid, so stalls survive and the total span is preserved, but individual durations
-# are within ~13ms rather than exact. See issue #2.
+# Timing is exact. Each source frame is placed at its own timestamp, by expressing the
+# cadence as a constant rate with held frames repeated rather than as concat `duration`
+# directives - those get snapped to the demuxer's 40ms grid, which used to leave every
+# frame within ~13ms of where it belonged. Verified at zero error across all 1480 frames
+# of the reference clip.
 #
 # Takes the raw output of a SeedVR2 upscale and produces watchable deliverables.
 # The ORIGINAL source is needed for two things: its real per-frame timestamps, and
@@ -61,9 +63,15 @@ ffprobe -v error -select_streams v:0 -show_entries frame=pts_time -of csv=p=0 "$
 rm -f "$W"/f_*.png
 ffmpeg -y -v error -i "$W/stab.mkv" "$W/f_%06d.png"
 echo "    $(ls "$W"/f_*.png | wc -l) frames"
-WORKDIR="$W" python - <<'PY'
+WORKDIR="$W" REPO="$REPO" python - <<'PY'
 import os
+import sys
+from fractions import Fraction
 from pathlib import Path
+
+sys.path.insert(0, os.path.join(os.environ["REPO"], "pipeline"))
+import timing
+
 w = Path(os.environ["WORKDIR"])
 pts = [float(x) for x in w.joinpath("pts.txt").read_text().split() if x.strip()]
 fr = sorted(w.glob("f_*.png"))
@@ -78,7 +86,7 @@ if len(fr) != len(pts):
     )
 
 n = len(fr)
-out, durs = [], []
+durs = []
 for i in range(n - 1):
     d = pts[i + 1] - pts[i]
     if d <= 0:
@@ -88,37 +96,86 @@ for i in range(n - 1):
             f"but wrong result, so it is an error."
         )
     durs.append(d)
-    out.append(f"file '{fr[i].name}'\nduration {d:.6f}")
 
 # The final frame has no following timestamp, so its duration is chosen rather than
 # derived. The median of the real gaps is the modal frame period and, unlike the last
 # gap, cannot accidentally inherit a stall.
 term = sorted(durs)[len(durs) // 2] if durs else 1 / 15
-out.append(f"file '{fr[n-1].name}'\nduration {term:.6f}")
-# Deliberately NO repeated final entry. The old idiom - repeat the last file so it gets
-# a duration - was correct while the loop wrote only n-1 entries. Now that all n are
-# written with explicit durations, repeating emits an n+1th frame: N in, N+1 out.
-w.joinpath("concat.txt").write_text("\n".join(out) + "\n")
-print(f"    concat {n} frames spanning {sum(durs)+term:.2f}s")
+
+# Timing is expressed as a CONSTANT rate with held frames repeated, not as per-frame
+# `duration` directives. The concat demuxer takes its timebase from the image demuxer,
+# which defaults to 1/25, and silently rounds every duration to that grid - a steady
+# 66.7ms cadence comes out as 80/40/80/40. Repeats have no such problem: this camera
+# only ever stalls for whole multiples of a frame period, so the same playback is
+# exactly representable at the base rate.
+base = timing.base_rate(durs) if durs else Fraction(15)
+reps, worst = timing.repeats(durs, term, base)
+if worst > 0.02:
+    raise SystemExit(
+        f"!! source gaps are not whole multiples of {1000/float(base):.1f}ms (worst "
+        f"offender is {worst:.3f} of a frame out). This footage cannot be expressed "
+        f"exactly at a constant rate, and the concat-duration alternative would quantise "
+        f"it to 40ms. Handle this source explicitly rather than approximating it."
+    )
+
+lines = []
+for f, r in zip(fr, reps):
+    lines += [f"file '{f.name}'"] * r
+w.joinpath("concat.txt").write_text("\n".join(lines) + "\n")
+# An exact rational, not a decimal. 1/0.066666 is 15.000150002, and ffmpeg's -r takes
+# that literally: the error accumulates to about a millisecond over a full clip.
+w.joinpath("base_fps.txt").write_text(f"{base.numerator}/{base.denominator}\n")
+# The span the VIDEO actually covers, from timestamps already checked for monotonicity
+# and representability. Not the container duration: that is max(video, audio), so a
+# source whose audio runs past its video would inflate the interpolation target and
+# produce a frozen tail.
+w.joinpath("span.txt").write_text(f"{sum(durs) + term:.9f}\n")
+held = sum(r - 1 for r in reps)
+print(f"    concat {n} source frames -> {len(lines)} at {base}fps "
+      f"({held} held), spanning {sum(durs)+term:.2f}s")
 PY
 
 echo "### [3/5] source-cadence renders"
-ffmpeg -y -v error -f concat -safe 0 -i "$W/concat.txt" -i "$SRC_ORIG" \
-  -map 0:v:0 -map 1:a:0? -vsync vfr -video_track_timescale 15000 \
+BASE_FPS=$(cat "$W/base_fps.txt")
+ffmpeg -y -v error -r "$BASE_FPS" -f concat -safe 0 -i "$W/concat.txt" -i "$SRC_ORIG" \
+  -map 0:v:0 -map 1:a:0? -r "$BASE_FPS" \
   -vf "$GRADE" -c:v libx264 -preset medium -crf 17 -pix_fmt yuv420p \
   -c:a aac -b:a 128k -movflags +faststart "$OUT_DIR/${TAG}_lumafix_14fps.mp4"
-ffmpeg -y -v error -f concat -safe 0 -i "$W/concat.txt" -i "$SRC_ORIG" \
-  -map 0:v:0 -map 1:a:0? -vsync vfr -video_track_timescale 15000 \
+ffmpeg -y -v error -r "$BASE_FPS" -f concat -safe 0 -i "$W/concat.txt" -i "$SRC_ORIG" \
+  -map 0:v:0 -map 1:a:0? -r "$BASE_FPS" \
   -c:v libx264 -preset medium -crf 17 -pix_fmt yuv420p \
   -c:a aac -b:a 128k -movflags +faststart "$OUT_DIR/${TAG}_lumafix_14fps_ungraded.mp4"
 
 echo "### [4/5] 60fps interpolation"
+# minterpolate ends before its last input frame - it has nothing to interpolate into -
+# and drops roughly a fifth of a second off the tail. This is not VFR-specific: a
+# perfectly CFR 15fps input loses the same frames, with or without motion estimation.
+# Clone a few frames onto the end so the filter has somewhere to run to, then trim back
+# to the length the SOURCE says we should have. Deriving the target from the source
+# rather than from the render keeps this independent of the concat timebase (issue #2).
+SRC_SPAN=$(cat "$W/span.txt")
+EXPECT60=$(python -c "print(round($SRC_SPAN * 60))")
+echo "    target $EXPECT60 frames (video spans ${SRC_SPAN}s)"
+
 # Interpolate from the GRADED render — the selective pass pulls held frames from it, and
 # mixing graded with ungraded puts a ~10-17 luma step at every hold boundary.
 ffmpeg -y -v error -i "$OUT_DIR/${TAG}_lumafix_14fps.mp4" \
-  -vf "minterpolate=fps=60:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1:scd=none" \
+  -vf "tpad=stop=8:stop_mode=clone,minterpolate=fps=60:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1:scd=none,trim=end_frame=$EXPECT60,setpts=PTS-STARTPTS" \
   -c:v libx264 -preset fast -crf 12 -an "$W/i60.mp4"
+I60_N=$(ffprobe -v error -select_streams v:0 -count_packets -show_entries stream=nb_read_packets -of csv=p=0 "$W/i60.mp4")
+echo "    interpolated $I60_N frames"
+if [ "$I60_N" -ne "$EXPECT60" ]; then
+  echo "!! interpolation produced $I60_N frames, expected $EXPECT60. Publishing this would"
+  echo "   be the truncated deliverable this step exists to prevent. If tpad is too small"
+  echo "   for the tail, raise stop=8."
+  exit 1
+fi
 
+# Ease stays at 3, unchanged. Whether to keep the cross-dissolve is an open question
+# that belongs to its own change, not to a timing fix: it blends two frames separated by
+# the largest gap in the clip, which costs 5-8% edge energy on exactly those frames, but
+# the alternative is a visible cut. docs/findings.md carries the measurements; the call
+# is one for the eye. Pass 0 here to disable it.
 echo "### [5/5] selective pass (hold gaps >150ms, ease 3)"
 python "$HERE/selective_interp.py" "$W/i60.mp4" "$OUT_DIR/${TAG}_lumafix_14fps.mp4" \
   "$W/pts.txt" "$W/sel.mkv" 150 3 2>&1 | tail -2

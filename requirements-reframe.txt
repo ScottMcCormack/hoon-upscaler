@@ -1,0 +1,18 @@
+# Experimental tracked-reframing path only: pipeline/detect_car.py and reframe_src.py.
+#
+# WARNING — LICENCE. ultralytics is AGPL-3.0. Installing this does not change this
+# repository's Apache-2.0 licence, but building on detect_car.py brings you under
+# AGPL-3.0 obligations. See NOTICE.
+#
+# This path is also not runnable as shipped: it needs a 1408x1152 "STABFIRST"
+# intermediate that no step in this repository produces. See README.
+#
+# torch here is the CPU build, which is enough for detection on this footage. For GPU,
+# install torch from the index matching your CUDA — on Blackwell (RTX 50-series) that
+# means --index-url https://download.pytorch.org/whl/cu130, since stock builds carry no
+# sm_120 kernels. See CLAUDE.md.
+
+-r requirements.txt
+torch==2.13.0
+torchvision==0.28.0
+ultralytics==8.4.135

@@ -1,0 +1,16 @@
+# Core pipeline: everything pipeline/finish.sh and tools/ need.
+#
+# Deliberately does NOT include the detection stack. pipeline/detect_car.py imports
+# ultralytics, which is AGPL-3.0 (see NOTICE), and that path is experimental and not
+# runnable as shipped. Anyone running the restoration pipeline should not be pulling
+# copyleft dependencies they will never execute — install requirements-reframe.txt only
+# if you are working on the tracked-reframing path.
+#
+# Versions are the ones this pipeline was verified against on 2026-09-03. Python 3.12:
+# 3.14 has no numpy or opencv wheels yet.
+#
+# ffmpeg and ffprobe are also required and are NOT pip-installable. The stabilise step
+# needs a build carrying the vidstab filters — see README.
+
+numpy==2.5.2
+opencv-contrib-python-headless==5.0.0.93

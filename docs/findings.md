@@ -41,6 +41,70 @@ finds the other.
 **Metrics that were reliable:** frame counts, timing-gap analysis, boundary alignment,
 VRAM/throughput, file integrity. All objectively defined.
 
+## The seventh metric, which worked — and the control that made it trustworthy
+
+`tools/stall_discontinuity.py`. Built to answer whether the selective pass's 3-frame
+cross-dissolve still earns its place now that stalls are held by repeated frames rather
+than by interpolation across a gap.
+
+**Why this one behaves where six did not.** The failures all went looking for an artifact
+whose *location was unknown* — somewhere in the frame, somewhere in the clip — and found
+sharpness instead. A stall's exit time is known in advance, from the source timestamps.
+There is nothing to search for; the only question is whether the frame-to-frame change at
+that known instant exceeds the clip's own ordinary motion. That is boundary alignment,
+already on the reliable list.
+
+**The null control is not optional.** A max-over-window divided by a median exceeds 1 by
+construction, so a raw ratio always looks like a finding; only comparing it against the
+same statistic computed away from the stalls says whether it is elevated.
+
+Current readings, from a fresh run on the 190-frame slice with four stall exits:
+
+| variant | baseline | observed | null median | percentile | sharp@exit |
+|---|---|---|---|---|---|
+| ease 3 (cross-dissolve) | 3.0992 | 1.10 | 1.50 | **8th** | 0.920 |
+| ease 1 | 3.1012 | 1.66 | 1.54 | 60th | 0.977 |
+| ease 0 (hold, then cut) | 3.0988 | 3.35 | 1.48 | **100th** | 1.017 |
+
+Read together: the dissolve makes stall exits far smoother than ordinary motion (8th
+percentile) at a cost of 8% edge energy on the blended frames; removing it makes them the
+most abrupt moments in the clip (100th) but leaves every frame sharp. That is a genuine
+trade, not a defect on either side, and which one is right is a question for the eye.
+
+**An earlier version of this table reported 22nd and 53rd percentiles and concluded there
+was no discontinuity to fix.** Both numbers were wrong, for two separate reasons, and the
+conclusion drawn from them was wrong too: the 53rd came from comparing the eased variant
+against the raw interpolated stream rather than against ease 0, and both were computed
+with a null control that compared a mean against single samples. Corrected below.
+
+**What it does not do:** say whether a discontinuity is visible. A step twice the size of
+ordinary motion may be imperceptible. Use it to find out whether there is anything worth
+looking at, then look.
+
+### The metric was wrong twice more before it settled
+
+Recorded because the pattern matters more than the fixes.
+
+**It had the sign backwards.** It scored the cross-dissolve variant as *smoother* and I
+read that as mildly good. Smoothness bought by blending two displaced frames **is** the
+ghost — a delta-only measure structurally cannot tell graceful continuity from a double
+exposure. Scott saw the smear by eye; the number had rated it an improvement. An
+`edge_energy` term now reports sharpness alongside abruptness, and the two together
+separate the cases: smooth and sharp is good, smooth and soft is a dissolve smearing the
+picture.
+
+**The null control compared the wrong statistic.** The observed value is a mean over N
+stall exits, but each null sample was a *single* window ratio. A mean of N has a narrower
+spread than one sample, so the percentile was biased — and null candidates were only
+checked at their centre, letting an eight-frame window overlap a stall it was supposed to
+avoid. Sampling means of N clear windows moved the readings from 22/74/93 to
+**8/60/100**. Same direction, sharper separation, and only now measuring what it claims.
+
+The lesson is narrow and repeatable: **the control has to be the same statistic as the
+observation.** Every wrong conclusion in this project's measurement history — including the
+byte-identical verification that hid two cancelling defects — came from comparing against
+the wrong baseline rather than from a bad idea.
+
 ## Models
 
 | Model | Result |

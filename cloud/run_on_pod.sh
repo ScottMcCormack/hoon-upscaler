@@ -43,7 +43,11 @@ apt-get update -qq >/dev/null 2>&1 || true
 apt-get install -y -qq ffmpeg git >/dev/null 2>&1 || true
 
 echo "### SeedVR2 ###"
-cd /workspace
+# /workspace is the RunPod pod convention; overridable so the script can be exercised
+# off-pod against stubs, which is where its guards get tested without paying for a GPU.
+WORKSPACE="${WORKSPACE:-/workspace}"
+[ -d "$WORKSPACE" ] || { echo "!! workspace '$WORKSPACE' does not exist"; exit 1; }
+cd "$WORKSPACE"
 [ -d SeedVR2 ] || git clone --depth 1 https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler.git SeedVR2
 cd SeedVR2
 

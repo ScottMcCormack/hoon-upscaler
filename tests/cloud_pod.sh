@@ -66,6 +66,9 @@ CLOUD="$W/cloud"; mkdir -p "$CLOUD"
 cp "$REPO/cloud/run_on_pod.sh" "$CLOUD/"
 ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=s=64x36:r=15:d=30" \
   -frames:v 214 -c:v libx264 -crf 30 -pix_fmt yuv420p "$CLOUD/test_15s.mp4"
+# A second source, to prove a named clip does not read or write the first one's files.
+ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=s=64x36:r=15:d=30" \
+  -frames:v 214 -c:v libx264 -crf 30 -pix_fmt yuv420p "$CLOUD/demo_test.mp4"
 
 # Each case must start clean: an output left by a previous case would satisfy the
 # "did inference produce a file?" check and mask a real failure.
@@ -133,6 +136,35 @@ clean; assert_stderr_matches "guard: inference producing no file is refused" "no
 # The check the whole script exists for: a crashed run leaves a plausible short file.
 clean; assert_stderr_matches "guard: a short render is refused" "frame count mismatch" \
   env PATH="$STUB:$PATH" WORKSPACE="$WS" STUB_OUT_FRAMES=200 bash "$CLOUD/run_on_pod.sh" 720 test
+
+# --- a second clip ----------------------------------------------------------
+# Two sources sharing one output name is the failure this argument exists to prevent:
+# the second render overwrites the first's master AND its manifest, and the manifest is
+# the only record of how that master was made.
+out="$(run_pod bash "$CLOUD/run_on_pod.sh" 720 test demo)"
+case "$out" in
+  *"[stub] would upscale"*"demo_test.mp4"*) ok "clip: a named clip reads <clip>_<mode>.mp4" ;;
+  *) bad "clip: a named clip reads <clip>_<mode>.mp4" "$(printf '%s' "$out" | grep 'would upscale')" ;;
+esac
+if [ -f "$CLOUD/sr_demo_test_720.mp4" ]; then ok "clip: writes sr_<clip>_<mode>_<res>.mp4"
+else bad "clip: writes sr_<clip>_<mode>_<res>.mp4" "no sr_demo_test_720.mp4"; fi
+if [ -f "$CLOUD/sr_test_720.mp4" ]; then
+  bad "clip: does not write the legacy output name" "sr_test_720.mp4 was created too"
+else ok "clip: does not write the legacy output name"; fi
+
+# Omitting the argument must still reproduce the original invocation, or the recorded
+# 720p master stops being replayable.
+out="$(run_pod bash "$CLOUD/run_on_pod.sh" 720 test)"
+case "$out" in
+  *"[stub] would upscale"*"test_15s.mp4"*) ok "clip: no clip argument keeps the legacy input" ;;
+  *) bad "clip: no clip argument keeps the legacy input" "$(printf '%s' "$out" | grep 'would upscale')" ;;
+esac
+
+clean; assert_stderr_matches "clip: a path separator in the clip name is refused" "invalid clip" \
+  env PATH="$STUB:$PATH" WORKSPACE="$WS" bash "$CLOUD/run_on_pod.sh" 720 test ../etc
+
+clean; assert_stderr_matches "clip: an unknown clip's missing input is refused" "not found" \
+  env PATH="$STUB:$PATH" WORKSPACE="$WS" bash "$CLOUD/run_on_pod.sh" 720 test nosuchclip
 
 # --- the happy path ---------------------------------------------------------
 out="$(run_pod bash "$CLOUD/run_on_pod.sh" 720 test)"; status=$?

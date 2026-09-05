@@ -95,6 +95,13 @@ ffmpeg -i in.mp4 \
 ffmpeg -i stabilised.mp4 -vf "crop=312:176:0:0" -crf 0 cropped.mp4
 ```
 
+`smoothing=20` and the crop geometry are tuned for the N90 clip, which is near-static
+handheld. **Match the smoothing window to the camera's motion before reusing these.** On a
+tracking shot it is far too wide: a second source that pans 1365px across a 320px frame
+needed `smoothing=10`, and 30 pulled black borders 61px into the picture while removing no
+more shake. Both the border intrusion and the residual shake are measurable on a ten-second
+segment before you rent anything — see [docs/findings.md](docs/findings.md).
+
 **Upscale** with SeedVR2 (locally, or on a rented GPU — see `cloud/`). `inference_cli.py`
 lives in the SeedVR2 checkout, so run it from there:
 

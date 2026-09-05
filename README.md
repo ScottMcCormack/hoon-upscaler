@@ -155,6 +155,10 @@ catches a broken setup in five minutes rather than forty.
 
 Pick **Ampere or Ada** (A40, A100, L40S), not Blackwell — see `CLAUDE.md`.
 
+All three VRAM branches were measured on hardware; `docs/findings.md` has the table. The
+short version: a 24GB card matches a 48GB card for speed at this clip size, and a 16GB card
+runs out of memory at 720 but is fine at 540.
+
 The runner needs two inputs beside it, neither of which is in the repo since both are
 media. Build them from the stabilised source, then upload both to the pod:
 

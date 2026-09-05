@@ -95,7 +95,17 @@ elif [ "$VRAM" -ge 22000 ]; then
 else
   MODEL="seedvr2_ema_3b_fp8_e4m3fn.safetensors"
   EXTRA="--batch_size 17 --temporal_overlap 3 --blocks_to_swap 16 --dit_offload_device cpu --vae_offload_device cpu"
-  echo "### ${VRAM}MB VRAM -> fp8 with offloading (same as the local run) ###"
+  echo "### ${VRAM}MB VRAM -> fp8 with offloading ###"
+  # Measured 2026-09-04 on an RTX A4000 (16376MB): resolution 720 dies with
+  # torch.OutOfMemoryError inside the VAE, not the DiT, so blocks_to_swap and the CPU
+  # offload flags above do not save it. 540 completed at 1.01 fps on the same card.
+  # This is the cliff CLAUDE.md describes, and it is a warning rather than a refusal
+  # because the exact limit depends on the card and this branch covers 16-22GB.
+  if [ "$RES" -ge 720 ]; then
+    echo "!! WARNING: ${VRAM}MB at resolution $RES is likely to run out of memory."
+    echo "   A 16GB card OOMs in the VAE at 720. 540 works. Continuing anyway - if it"
+    echo "   dies with OutOfMemoryError, lower the resolution rather than the batch size."
+  fi
 fi
 
 echo "### running: $MODE at resolution $RES ###"

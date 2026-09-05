@@ -90,6 +90,14 @@ for case in "49140:batch 33:A40 48GB" "24564:batch 17:RTX 3090 24GB" "16376:fp8 
   esac
 done
 
+# The low-VRAM branch must warn before a resolution that is known to OOM there.
+out="$(STUB_VRAM=16376 run_pod bash "$CLOUD/run_on_pod.sh" 720 test)"
+case "$out" in *"likely to run out of memory"*) ok "vram: 16GB at 720 warns about OOM" ;;
+  *) bad "vram: 16GB at 720 warns about OOM" "no warning emitted" ;; esac
+out="$(STUB_VRAM=16376 run_pod bash "$CLOUD/run_on_pod.sh" 540 test)"
+case "$out" in *"likely to run out of memory"*) bad "vram: 16GB at 540 does not warn" "warned unnecessarily" ;;
+  *) ok "vram: 16GB at 540 does not warn" ;; esac
+
 # --- guards -----------------------------------------------------------------
 clean; assert_stderr_matches "guard: non-integer VRAM is refused" "could not read VRAM" \
   env PATH="$STUB:$PATH" WORKSPACE="$WS" STUB_VRAM="[N/A]" bash "$CLOUD/run_on_pod.sh" 720 test

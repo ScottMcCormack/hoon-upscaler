@@ -195,3 +195,30 @@ That is exactly why `masters/` exists and why its README says every downstream c
 re-run from there for free. Re-deriving one is not a fallback; it produces a different
 starting point.
 
+## All three VRAM branches, measured on hardware 2026-09-04
+
+`run_on_pod.sh` picks one of three configurations from the card's reported VRAM. Until now
+only the top branch had ever run. All three, one 15-second test each:
+
+| card | reported | branch | resolution | result |
+|---|---|---|---|---|
+| A40 | 46368 MB | fp16, batch 33 | 720 | 214 frames, 5m24s, **0.68 fps** |
+| A40 | 46368 MB | fp16, batch 33 | 720, full clip | 1480 frames, 25m11s, **0.98 fps** |
+| RTX 4090 | 24564 MB | fp16, batch 17 | 720 | 214 frames, 5m23s, **0.68 fps** |
+| RTX A4000 | 16376 MB | fp8 + offload | 720 | **OOM in the VAE** |
+| RTX A4000 | 16376 MB | fp8 + offload | 540 | 60 frames, **1.01 fps** |
+
+**The 4090 at batch 17 matched the A40 at batch 33** — 5m23s against 5m24s. Batch width is
+about temporal coherence, not throughput, so the extra VRAM buys quality rather than speed
+at this clip size. Worth knowing before paying for a bigger card on speed grounds.
+
+**The low-VRAM branch is not broken, but 720 is out of reach for 16GB.** It dies with
+`torch.OutOfMemoryError` inside `attn_video_vae.py`, in the VAE rather than the DiT — so
+`--blocks_to_swap 16` and the CPU offload flags, which act on the DiT, cannot save it. The
+same card completed 540 comfortably. That is the cliff CLAUDE.md describes, located
+precisely: between 540 and 720 output on 16GB.
+
+The script now warns before that combination rather than letting someone discover it after
+paying for setup. A warning, not a refusal: the branch covers 16-22GB and the exact limit
+moves with the card.
+

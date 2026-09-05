@@ -244,6 +244,29 @@ if want repository; then
   done
 fi
 
+# ---------------------------------------------------------------------------
+# The cloud runner, driven against stubs. Separate file because it fakes an entire
+# environment; run from here so it is not forgotten.
+# ---------------------------------------------------------------------------
+if want cloud; then
+  echo
+  CLOUD_OUT="$(bash "$REPO/tests/cloud_pod.sh" 2>&1)"; CLOUD_STATUS=$?
+  printf '%s\n' "$CLOUD_OUT" | sed -n '2,$p' | grep -E 'PASS|FAIL|^$' || true
+  # Fold its tally into ours. Strip ANSI first: the colour codes put a word character
+  # immediately before PASS, so a \b anchor never matches.
+  CLOUD_PLAIN="$(printf '%s' "$CLOUD_OUT" | sed 's/\x1b\[[0-9;]*m//g')"
+  CP="$(printf '%s' "$CLOUD_PLAIN" | grep -cE '^  PASS ' || true)"
+  CF="$(printf '%s' "$CLOUD_PLAIN" | grep -cE '^  FAIL ' || true)"
+  PASS=$((PASS + CP)); FAIL=$((FAIL + CF))
+  # A child that crashes before printing any FAIL line reports nothing, so counting only
+  # its FAIL lines would let a nonzero exit pass as success. Charge one failure for the
+  # exit status itself when it did not account for one.
+  if [ "$CLOUD_STATUS" -ne 0 ]; then
+    FAILED_NAMES+=("cloud pod runner (exit $CLOUD_STATUS) — see bash tests/cloud_pod.sh")
+    [ "$CF" -eq 0 ] && FAIL=$((FAIL + 1))
+  fi
+fi
+
 echo
 if [ "$FAIL" -eq 0 ]; then
   printf '\033[32m%d passed\033[0m\n' "$PASS"

@@ -37,6 +37,23 @@ Build metrics only for things with objective definitions — frame counts, timin
 boundary alignment, file integrity. Those were reliable throughout. For "does this look
 right", produce a visual comparison and ask.
 
+**Every wrong conclusion in this project came from a mismatched baseline, not a bad idea.**
+Four times now, a measurement was sound and its *comparison* was not:
+
+- A full re-render matched the previous deliverable byte-for-byte, which read as proof the
+  changes were safe. It was two defects cancelling — an off-by-one adding a frame and
+  `-shortest` removing one. An endpoint comparison cannot tell that from correctness.
+- The cross-dissolve was scored against the raw interpolated stream rather than against the
+  no-ease variant, producing "there is no discontinuity to fix" — the opposite of the truth.
+- Camera displacement across two stalls measured 0.00px, because the frames being compared
+  both sat inside the same hold. They actually carry 4.17 and 3.55px.
+- SeedVR2 was declared non-deterministic by comparing a batch-33 render against a batch-65
+  master. Different parameters, so the comparison says nothing about determinism.
+
+Before trusting a comparison, state what differs between the two things. If more than the
+variable under test differs, the number is not evidence. A null control — the same statistic
+computed where the effect should not appear — catches most of it.
+
 ## Ordering rules — most bugs were a sensible step in the wrong place
 
 - **Never denoise before the restoration model.** `hqdn3d` helped Real-ESRGAN and badly
@@ -64,7 +81,8 @@ right", produce a visual comparison and ask.
   kernels for it — install with `--index-url .../whl/cu130`. Cloud Ampere/Ada cards (A40,
   A100, L40S) take stock builds; another Blackwell (RTX 5090) repeats the trap.
 - **16GB VRAM is a cliff, not a curve.** Below it ~1.3s/frame, above ~25s/frame — 19×
-  from a 25% resolution increase. An A40 48GB at $0.44/hr removes it for about $1 a job.
+  from a 25% resolution increase. An A40 48GB removes it — $0.49/hr as of Sept 2026, and
+  a measured $0.34 for the whole clip at 720 including setup.
 - **15GB system RAM.** Long clips held entirely in memory trigger the OOM killer. Use
   chunked/streaming modes; check `dmesg | grep -i oom-kill` when a process dies silently.
 - **Venvs cannot be created on `/mnt/z`** (Windows mount) — installs fail on file copies.

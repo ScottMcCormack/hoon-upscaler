@@ -125,6 +125,7 @@ Produces `MyClip_lumafix_14fps.mp4`, `_14fps_ungraded.mp4` and `_lumafix_K5.mp4`
 | `pipeline/reframe_src.py` | Solves a deadzone virtual camera from YOLO detections |
 | `pipeline/detect_car.py` | Per-frame subject detection (for tracked reframing) |
 | `cloud/run_on_pod.sh` | Provision-and-run on a rented GPU |
+| `tests/cloud_pod.sh` | Exercises the cloud runner against stubs, no GPU needed |
 | `tools/stall_discontinuity.py` | Scores how abrupt each stall exit is, against the clip's own motion |
 
 `reframe_src.py` and `detect_car.py` are an **experimental tracked-reframing path, not part
@@ -138,11 +139,39 @@ in the wrong coordinates. Producing the STABFIRST intermediate is left undocumen
 ## Renting a GPU
 
 A 16GB card hits a hard wall above ~1021×576 output — throughput drops roughly 19× as
-model blocks swap to system RAM. An **A40 48GB** on RunPod at $0.44/hr removes it: a
-720p render went from an impractical 10 hours to 22 minutes, and 1080p became possible
-at all. Three full renders plus two model comparisons cost about $1.
+model blocks swap to system RAM. An **A40 48GB** on RunPod removes it, and 1080p becomes
+possible at all.
+
+Measured on 2026-09-04, end to end via `cloud/run_on_pod.sh`:
+
+| | frames | wall clock | throughput |
+|---|---|---|---|
+| 15s test at 720 | 214 | 5m24s | 0.68 fps |
+| full clip at 720 | 1480 | 25m11s | 0.98 fps |
+
+**$0.34 total** at $0.49/hr, including pod setup, the SeedVR2 checkout and the first-run
+model download. The test render is worth doing first regardless — it costs about $0.15 and
+catches a broken setup in five minutes rather than forty.
 
 Pick **Ampere or Ada** (A40, A100, L40S), not Blackwell — see `CLAUDE.md`.
+
+All three VRAM branches were measured on hardware; `docs/findings.md` has the table. The
+short version: a 24GB card matches a 48GB card for speed at this clip size, and a 16GB card
+runs out of memory at 720 but is fine at 540.
+
+The runner needs two inputs beside it, neither of which is in the repo since both are
+media. Build them from the stabilised source, then upload both to the pod:
+
+```bash
+ffmpeg -i stabilised.mp4 -vf "crop=312:176:0:0" -crf 0 cloud/full_169.mp4
+ffmpeg -i cloud/full_169.mp4 -frames:v 214 -c copy    cloud/test_15s.mp4
+```
+
+Run the 15-second one first — `bash run_on_pod.sh 720 test`. It costs about $0.15 and
+catches a broken setup in five minutes instead of forty.
+
+`bash tests/cloud_pod.sh` exercises the runner against stubs before you rent anything.
+It proves the script's own logic; it cannot tell you anything about the pod image.
 
 See `cloud/run_on_pod.sh` and `docs/findings.md`.
 

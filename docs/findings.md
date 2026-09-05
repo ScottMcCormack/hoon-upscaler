@@ -149,3 +149,260 @@ Above ~65 the setting stops earning its VRAM.
 - Correlation trackers (CSRT) fail on this footage: they slide onto the smoke within
   seconds while reporting a successful lock every frame. Detection-based tracking (YOLO)
   re-decides each frame and cannot drift.
+
+## Interpolation and stall handling — five things ruled out, 2026-09-03
+
+Run after the timing fixes landed, on a 190-frame slice of the real clip. All negative or
+near-negative, which is why they are here: each one costs a couple of hours to re-derive.
+
+### The selective pass is NOT redundant
+
+With stalls now expressed as repeated frames, `minterpolate` holds them naturally, so the
+substitution looked like it might have become a no-op. It has not. Comparing the pass's
+FFV1 output against the exact interpolated stream it was fed:
+
+| region | mean abs difference | max |
+|---|---|---|
+| outside stalls | 0.029 | 10.6 |
+| inside stalls | **1.826** | 12.3 |
+
+61 frames substituted, 55 inside stalls. The interpolator's natural hold is *close to* the
+source frame but not equal to it, and the pass replaces the approximation with the real
+thing. Keep it.
+
+A first attempt compared two separately x264-encoded files and put the outside-stall figure
+at 0.82 — that was codec noise read as signal. The lossless rerun is what settles it.
+
+### No minterpolate setting recovers the 3.4% softening of synthesised frames
+
+Three quarters of every 60fps frame is synthesised, and those measure ~3.4% softer than
+frames landing on a real source instant. Nothing tested fixes that.
+
+| variant | synth/real sharpness | p99 frame jump |
+|---|---|---|
+| aobmc / bidir / vsbmc (current) | 0.962 | 5.861 |
+| aobmc / **bilat** / vsbmc | 0.974 | 5.996 |
+| ffmpeg defaults | 0.974 | 6.021 |
+| me=umh | 0.951 | 5.994 |
+
+`me_mode=bilat` trades 1.2% sharpness for 2% rougher motion — a taste call, not a win, and
+not adopted. `me=umh` is worse on both counts.
+
+**Two of the three options the pipeline sets do nothing on their own.**
+`mc_mode=obmc:vsbmc=1` and `mc_mode=aobmc:vsbmc=0` produce **byte-identical** files, so
+`vsbmc` only takes effect with `aobmc`, and `aobmc` without it degenerates to `obmc`. Worth
+knowing before anyone tunes them.
+
+### The recovered tail is real motion, not padding
+
+`tpad=stop=8:stop_mode=clone` pads the interpolator's input with clones. If those survived
+the trim the clip would end on an artificial freeze. Tested on a slice deliberately ending
+on **ordinary motion** (the full clip ends on a stall and cannot distinguish the two):
+motion continues to the last real timestamp at 0.85× the body median, then three frames
+hold. That hold is correct — the terminal frame's duration is one frame period, four frames
+at 60fps.
+
+### Grade order does not affect interpolation softness
+
+The pipeline interpolates from the *graded* render, so the grade's 1.20 contrast boost might
+have been amplifying an already-soft frame.
+
+| order | ratio |
+|---|---|
+| grade then interpolate (current) | 0.962 |
+| interpolate then grade | 0.960 |
+
+No difference, and there is a documented reason not to reorder anyway: the selective pass
+pulls held frames from the graded render, and mixing graded with ungraded puts a
+10.5-mean/16.9-max luma step at every hold boundary. Leave it alone.
+
+### Sources the pipeline was not built for
+
+A stall-free CFR source works — 60 frames in, 60 at 15fps, 0 held, 240 output frames. The
+stall machinery degrades to nothing rather than misbehaving.
+
+Timing that no constant rate can express is refused rather than approximated: gaps of
+50/70ms and 40/65/90ms are rejected, while 67/133/267ms and NTSC 15000/1001 are accepted.
+Unit-tested in `tests/run.sh`, because building a video with genuinely irregular timing
+turned out to be harder than testing the function.
+
+### The ease ghost scales with camera movement, and every stall here moves
+
+The cross-dissolve's damage is proportional to how far the camera travelled across the
+stall — it blends two frames that far apart. Ground truth from consecutive source frames in
+the master:
+
+```
+stall 119   200ms   4.09px
+stall 128   200ms   4.17px
+stall 145   267ms   3.55px
+stall 188   267ms   8.18px
+```
+
+**Every stall in this clip carries 3.5-8.2px**, so there is no stall where blending is free.
+A displacement-gated ease — dissolve only below a pixel threshold — was prototyped and
+rejects all four at 2.5px, making it identical to `ease 0` here. The idea is sound; this
+footage gives it nothing to work with.
+
+An earlier version of this section reported 0.00px for two of those stalls. That was wrong:
+the measurement read frames from the 60fps output at indices that both landed inside a hold,
+so it compared a frame with itself.
+
+## The cloud runner, first executed 2026-09-04
+
+`cloud/run_on_pod.sh` existed for months without ever being run. `tests/cloud_pod.sh` now
+drives it against stubs and catches most of what can go wrong, but the first real pod run
+found something no stub could.
+
+**PEP 668 killed it before inference.** The `runpod-torch-v280` template is Ubuntu 24.04,
+which marks the system Python externally managed, so `pip install` refuses outright:
+
+```
+error: externally-managed-environment
+```
+
+The script died there on its first ever run. A venv is the reflex fix and the wrong one:
+the point is to install *alongside* the CUDA-matched torch the image already ships, and the
+pod is disposable. It now detects the `EXTERNALLY-MANAGED` marker and adds
+`--break-system-packages` only when present, since older pips reject the flag.
+
+Worth being precise about why the stub harness missed it: the stub `pip` was a no-op, so it
+could never have surfaced this. Stubs prove the script's own logic — branch selection, the
+guards, the frame check. They cannot prove anything about the environment it lands in.
+
+**runpodctl 2.12.0 does not have `--terminate-after`.** The documented cost guard for a
+throwaway pod does not exist in this version, so there is nothing to stop a forgotten pod
+billing. Use `--wait --wait-timeout` to block until SSH answers, and arm your own watchdog.
+Also `--gpu-id` wants the `gpuId` (`NVIDIA A40`), not the `displayName` (`A40`).
+
+**SeedVR2 IS deterministic — an earlier entry here said the opposite and was wrong.**
+
+Two renders of the same clip, back to back on one pod, produced **byte-identical output**:
+
+```
+resolution, model, extra_args, fixed_args, gpu, torch, seedvr2_commit, input sha256   all identical
+output sha256   40003bbf860a7310f48b32fb23c72577…   (both runs)
+```
+
+The earlier claim came from comparing a fresh batch-33 render against the batch-65 720p
+master and finding all 1480 frames different. That was a parameter difference, not
+nondeterminism — the same mismatched-baseline error CLAUDE.md now warns about, made while
+writing up the previous finding.
+
+What this changes: **a master can be recreated, provided you have its parameters.** That
+makes the manifest the load-bearing artifact rather than the master file itself. It also
+makes `BATCH_SIZE`/`TEMPORAL_OVERLAP` overrides worth having, since the VRAM branch picks
+settings for a fresh render and cannot select the batch 65 the 720p master was built with.
+
+**Confirmed against a real master.** The 1080p master, rendered months earlier, was
+reproduced from its recorded parameters:
+
+```
+master  sha256 8412f5bd5d662b03cc70b43f6a428658affae9a24ce9a5e1   273,813,416 bytes
+repro   sha256 8412f5bd5d662b03cc70b43f6a428658affae9a24ce9a5e1   273,813,416 bytes
+```
+
+That is stronger than the two-runs-on-one-pod test, because it clears confounds that test
+could not: `chunk_size`, the cache flags and `color_correction` were unrecorded for that
+master, and the SeedVR2 revision was unknown. A byte-identical result means all of them
+match the script's current values.
+
+`masters/` still earns its place — it saves the GPU spend and the wait — but it is a cache,
+not an irreplaceable original.
+
+## All three VRAM branches, measured on hardware 2026-09-04
+
+`run_on_pod.sh` picks one of three configurations from the card's reported VRAM. Until now
+only the top branch had ever run. All three, one 15-second test each:
+
+| card | reported | branch | resolution | result |
+|---|---|---|---|---|
+| A40 | 46368 MB | fp16, batch 33 | 720 | 214 frames, 5m24s, **0.68 fps** |
+| A40 | 46368 MB | fp16, batch 33 | 720, full clip | 1480 frames, 25m11s, **0.98 fps** |
+| RTX 4090 | 24564 MB | fp16, batch 17 | 720 | 214 frames, 5m23s, **0.68 fps** |
+| RTX A4000 | 16376 MB | fp8 + offload | 720 | **OOM in the VAE** |
+| RTX A4000 | 16376 MB | fp8 + offload | 540 | 60 frames, **1.01 fps** |
+
+**The 4090 at batch 17 matched the A40 at batch 33** — 5m23s against 5m24s. Batch width is
+about temporal coherence, not throughput, so the extra VRAM buys quality rather than speed
+at this clip size. Worth knowing before paying for a bigger card on speed grounds.
+
+**The low-VRAM branch is not broken, but 720 is out of reach for 16GB.** It dies with
+`torch.OutOfMemoryError` inside `attn_video_vae.py`, in the VAE rather than the DiT — so
+`--blocks_to_swap 16` and the CPU offload flags, which act on the DiT, cannot save it. The
+same card completed 540 comfortably. That is the cliff CLAUDE.md describes, located
+precisely: between 540 and 720 output on 16GB.
+
+The script now warns before that combination rather than letting someone discover it after
+paying for setup. A warning, not a refusal: the branch covers 16-22GB and the exact limit
+moves with the card.
+
+## Record the parameters or the render is uninterpretable
+
+Every master needs its full invocation stored beside it. `cloud/run_on_pod.sh` writes a
+`.json` manifest with the argument list, model, resolution, GPU and VRAM, torch version,
+SeedVR2 commit, and frame counts plus sha256 for input and output.
+
+The cost of not having this was concrete. `masters/README.md` recorded batch and overlap
+only, so when a fresh render was compared against the 720p master and every frame differed,
+the obvious reading was that SeedVR2 is nondeterministic. It was not evidence of anything:
+the master is batch 65 and the render was batch 33. Different questions, different answers.
+
+`chunk_size`, the cache flags, `color_correction` and the SeedVR2 revision were unrecorded
+for both existing masters. That turned out not to matter — the 1080p master reproduced
+byte-for-byte, so all of them match the script's current values — but it was not knowable
+in advance, which is the point.
+
+The 720p master needs `BATCH_SIZE=65` passed explicitly, since the A40 branch derives batch
+33 and nothing selects 65 from VRAM alone. That override exists precisely because the
+branch chooses for a *fresh* render and reproducing one is a different job.
+
+The general form of this is already in CLAUDE.md: a comparison is only evidence if you can
+state what differs between the two things. A manifest is how you state it after the fact.
+
+## Durable output and A40 availability are currently mutually exclusive
+
+A pod's local disk dies with the pod. A power cut on the controlling machine cost one
+1080 render (~$0.66) because nothing local survived to download it, and the pod was
+orphaned until it was noticed by hand.
+
+The fix is a network volume, which outlives the pod. It cannot be used with an A40:
+
+```
+A40 stock          CA-MTL-1 (Low), EU-SE-1 (none), US-MO-1 (none)
+volume-capable DCs CA-MTL-3, CA-MTL-4, EU-FR-1, EU-NL-1, EU-RO-1, EUR-IS-1, US-MO-2, …
+                   — neither CA-MTL-1 nor EU-SE-1 among them
+```
+
+The cheapest volume-compatible card at 48GB is an RTX 6000 Ada at $0.84/hr against the
+A40's $0.49. But price is not the reason to avoid it: **determinism has only been verified
+within one card.** Cross-GPU determinism is untested, so reproducing an A40-made master on
+a different architecture would confound the result — a mismatch could be floating-point
+kernel differences rather than anything about the pipeline.
+
+The asymmetry is worth remembering: on a different card, a *match* would prove a lot
+(determinism holds across architectures too); a *mismatch* would prove nothing. So use a
+volume for any run that is not reproducing an existing A40 master, and accept the local-disk
+risk for the ones that are.
+
+## A pod is not necessarily yours alone
+
+The runner terminates its pod from an EXIT trap, which is right when the pod exists only
+for that job. It nearly destroyed someone else's work: a second workload was started on the
+same pod, and the trap would have torn it down the moment the first render's download
+finished.
+
+Killing the runner would not have helped — the trap catches INT and TERM. `SIGKILL` was the
+only way to stop it firing.
+
+Before any automatic teardown, check what is actually running:
+
+```bash
+nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv
+pgrep -af inference_cli
+ls -lh /workspace/cloud/*.mp4       # and whether every output has been retrieved
+```
+
+Three finished renders belonging to another job were sitting undownloaded when teardown was
+requested. Terminating would have destroyed them.
+

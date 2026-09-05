@@ -150,6 +150,104 @@ Above ~65 the setting stops earning its VRAM.
   seconds while reporting a successful lock every frame. Detection-based tracking (YOLO)
   re-decides each frame and cannot drift.
 
+## Interpolation and stall handling — five things ruled out, 2026-09-03
+
+Run after the timing fixes landed, on a 190-frame slice of the real clip. All negative or
+near-negative, which is why they are here: each one costs a couple of hours to re-derive.
+
+### The selective pass is NOT redundant
+
+With stalls now expressed as repeated frames, `minterpolate` holds them naturally, so the
+substitution looked like it might have become a no-op. It has not. Comparing the pass's
+FFV1 output against the exact interpolated stream it was fed:
+
+| region | mean abs difference | max |
+|---|---|---|
+| outside stalls | 0.029 | 10.6 |
+| inside stalls | **1.826** | 12.3 |
+
+61 frames substituted, 55 inside stalls. The interpolator's natural hold is *close to* the
+source frame but not equal to it, and the pass replaces the approximation with the real
+thing. Keep it.
+
+A first attempt compared two separately x264-encoded files and put the outside-stall figure
+at 0.82 — that was codec noise read as signal. The lossless rerun is what settles it.
+
+### No minterpolate setting recovers the 3.4% softening of synthesised frames
+
+Three quarters of every 60fps frame is synthesised, and those measure ~3.4% softer than
+frames landing on a real source instant. Nothing tested fixes that.
+
+| variant | synth/real sharpness | p99 frame jump |
+|---|---|---|
+| aobmc / bidir / vsbmc (current) | 0.962 | 5.861 |
+| aobmc / **bilat** / vsbmc | 0.974 | 5.996 |
+| ffmpeg defaults | 0.974 | 6.021 |
+| me=umh | 0.951 | 5.994 |
+
+`me_mode=bilat` trades 1.2% sharpness for 2% rougher motion — a taste call, not a win, and
+not adopted. `me=umh` is worse on both counts.
+
+**Two of the three options the pipeline sets do nothing on their own.**
+`mc_mode=obmc:vsbmc=1` and `mc_mode=aobmc:vsbmc=0` produce **byte-identical** files, so
+`vsbmc` only takes effect with `aobmc`, and `aobmc` without it degenerates to `obmc`. Worth
+knowing before anyone tunes them.
+
+### The recovered tail is real motion, not padding
+
+`tpad=stop=8:stop_mode=clone` pads the interpolator's input with clones. If those survived
+the trim the clip would end on an artificial freeze. Tested on a slice deliberately ending
+on **ordinary motion** (the full clip ends on a stall and cannot distinguish the two):
+motion continues to the last real timestamp at 0.85× the body median, then three frames
+hold. That hold is correct — the terminal frame's duration is one frame period, four frames
+at 60fps.
+
+### Grade order does not affect interpolation softness
+
+The pipeline interpolates from the *graded* render, so the grade's 1.20 contrast boost might
+have been amplifying an already-soft frame.
+
+| order | ratio |
+|---|---|
+| grade then interpolate (current) | 0.962 |
+| interpolate then grade | 0.960 |
+
+No difference, and there is a documented reason not to reorder anyway: the selective pass
+pulls held frames from the graded render, and mixing graded with ungraded puts a
+10.5-mean/16.9-max luma step at every hold boundary. Leave it alone.
+
+### Sources the pipeline was not built for
+
+A stall-free CFR source works — 60 frames in, 60 at 15fps, 0 held, 240 output frames. The
+stall machinery degrades to nothing rather than misbehaving.
+
+Timing that no constant rate can express is refused rather than approximated: gaps of
+50/70ms and 40/65/90ms are rejected, while 67/133/267ms and NTSC 15000/1001 are accepted.
+Unit-tested in `tests/run.sh`, because building a video with genuinely irregular timing
+turned out to be harder than testing the function.
+
+### The ease ghost scales with camera movement, and every stall here moves
+
+The cross-dissolve's damage is proportional to how far the camera travelled across the
+stall — it blends two frames that far apart. Ground truth from consecutive source frames in
+the master:
+
+```
+stall 119   200ms   4.09px
+stall 128   200ms   4.17px
+stall 145   267ms   3.55px
+stall 188   267ms   8.18px
+```
+
+**Every stall in this clip carries 3.5-8.2px**, so there is no stall where blending is free.
+A displacement-gated ease — dissolve only below a pixel threshold — was prototyped and
+rejects all four at 2.5px, making it identical to `ease 0` here. The idea is sound; this
+footage gives it nothing to work with.
+
+An earlier version of this section reported 0.00px for two of those stalls. That was wrong:
+the measurement read frames from the 60fps output at indices that both landed inside a hold,
+so it compared a frame with itself.
+
 ## The cloud runner, first executed 2026-09-04
 
 `cloud/run_on_pod.sh` existed for months without ever being run. `tests/cloud_pod.sh` now

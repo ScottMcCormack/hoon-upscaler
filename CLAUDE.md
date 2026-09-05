@@ -37,6 +37,23 @@ Build metrics only for things with objective definitions — frame counts, timin
 boundary alignment, file integrity. Those were reliable throughout. For "does this look
 right", produce a visual comparison and ask.
 
+**Every wrong conclusion in this project came from a mismatched baseline, not a bad idea.**
+Four times now, a measurement was sound and its *comparison* was not:
+
+- A full re-render matched the previous deliverable byte-for-byte, which read as proof the
+  changes were safe. It was two defects cancelling — an off-by-one adding a frame and
+  `-shortest` removing one. An endpoint comparison cannot tell that from correctness.
+- The cross-dissolve was scored against the raw interpolated stream rather than against the
+  no-ease variant, producing "there is no discontinuity to fix" — the opposite of the truth.
+- Camera displacement across two stalls measured 0.00px, because the frames being compared
+  both sat inside the same hold. They actually carry 4.17 and 3.55px.
+- SeedVR2 was declared non-deterministic by comparing a batch-33 render against a batch-65
+  master. Different parameters, so the comparison says nothing about determinism.
+
+Before trusting a comparison, state what differs between the two things. If more than the
+variable under test differs, the number is not evidence. A null control — the same statistic
+computed where the effect should not appear — catches most of it.
+
 ## Ordering rules — most bugs were a sensible step in the wrong place
 
 - **Never denoise before the restoration model.** `hqdn3d` helped Real-ESRGAN and badly

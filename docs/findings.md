@@ -343,3 +343,92 @@ batch 65 today.
 The general form of this is already in CLAUDE.md: a comparison is only evidence if you can
 state what differs between the two things. A manifest is how you state it after the fact.
 
+
+## A second source, 2026-09-05 — where the recipe held and where it did not
+
+`input/MVI_0081.avi`, the first footage this pipeline has been pointed at that is not the
+2007 N90 clip. It was assumed to be the same camera. It is not, and the differences that
+mattered were not the ones the specs suggested.
+
+```
+                    21042007052.mp4 (N90)      MVI_0081.avi (Canon)
+container/codec     mp4 / mpeg4                AVI / MJPEG, intra-only
+resolution          352x288 (CIF)              320x240 (4:3, square px)
+video bitrate       509 kbps                   1449 kbps  (~19x per pixel)
+pixel format        yuv420p, pc range          yuvj422p, pc range
+timing              15fps VFR, with stalls     15fps CFR, 851/851 gaps at 66.666ms
+length              1480 frames / 103.7s       852 frames / 56.8s
+audio               AAC 16kHz mono             PCM u8 11.024kHz mono
+metadata            -                          software=CanonMVI01, 2006-05-21 11:09:40
+```
+
+**The timing machinery needed no changes.** `timing.base_rate` returns 15 with worst-case
+error 0.00001 of a frame (limit 0.02), 0 frames held, span 56.799432s. No gap exceeds the
+selective pass's 150ms threshold, so that pass degrades to plain 60fps interpolation. This
+is the stall-free CFR case already unit-tested above, now confirmed on real footage.
+`mpdecimate` drops 2 of 852 frames, so the constant timestamps reflect genuine constant
+motion rather than a camera padding its output.
+
+### Stabiliser smoothing has to match the camera's motion, and 20 is wrong here
+
+The N90 clip is near-static handheld. This one is a tracking shot: phase correlation over
+all 852 frames gives mean inter-frame displacement 6.44px and a **cumulative horizontal
+range of 1365px across a 320px-wide frame** — more than four frame-widths of deliberate pan.
+
+A wide smoothing window treats that pan as something to remove, and pays for it in border
+fill. Measured on the 20-30s segment, the fastest pan in the clip:
+
+```
+smoothing   worst border intrusion   mean black area   residual shake (9-frame)
+   10                  8px                0.06%              1.25 px/frame
+   30                 61px                3.90%              1.18 px/frame
+   60                154px               17.60%              1.25 px/frame
+   source              -                     -               2.32 px/frame
+```
+
+Smoothing 10 already recovers all the available shake reduction; 30 and 60 buy nothing and
+consume up to half the frame. The README's documented `smoothing=20` sits between the first
+two rows. Across the full clip at smoothing 10, worst intrusion is 11px on 15 of 852 frames,
+which a 12px crop margin absorbs.
+
+The rule is not "use 10". It is that the window must be shorter than the camera's intended
+movement, and the cost of getting it wrong is measurable before any GPU is rented.
+
+### The luma step is aimed at hunting, and this camera drifts instead
+
+`luma_stabilise.py` exists to remove the N90's auto-exposure oscillation. Whether a clip
+oscillates is objective — count direction changes in per-frame mean luma:
+
+```
+                 YAVG mean   stdev   direction flips
+N90 clip           133.9      4.2     715/1479 = 48.3%   -> oscillating (hunting)
+MVI_0081           217.9     26.5     161/851  = 18.9%   -> monotonic runs (drift)
+```
+
+The drift is the operator panning off a blown sky onto shaded ground over the closing six
+seconds, 231 -> 117 mean Y. That is a real exposure change in the scene, not a defect, and a
+61-frame rolling normalisation would flatten it. Untested against a render so far; the call
+belongs to the eye, on a visual comparison of the finish pass with and without the step.
+
+This is the same shape as the pre-filter finding: a step that is correct for one source is
+not thereby correct for the next, and the cheap check is whether the defect it targets is
+actually present.
+
+### The subject is small, which bounds what the upscale can honestly claim
+
+YOLO11m over all 852 frames finds a vehicle in 87% of them. Median width **42px**, mean 57px,
+p90 133px, reaching 301px only in the closing seconds as the car approaches.
+
+At the ratios this pipeline uses, a 42px car is not resolved, it is invented — the whole
+subject, not just lettering on a sign. The closing frames additionally carry readable text
+(`AUTOWORX` on the door), which is exactly the case that produced a confident wrong phone
+number on the N90 clip. Both are reasons to look at 720 before paying for 1080, and reasons
+the output term of use in CONTRIBUTING.md applies with more force here, not less.
+
+### Framing
+
+Crop `296:168:12:44` from the stabilised 320x240. The 12px side margin absorbs the worst
+measured border intrusion; the y offset of 44 discards the top rows, which sit at mean Y
+251-253 and are clipped white. The car falls entirely inside for 97.3% of detected frames and
+overlaps for 99.6% — the shortfall is the closing approach, where the car is larger than the
+crop, which is intended. AR 1.762, close to the original deliverable's 312x176 (1.773).

@@ -108,6 +108,17 @@ else
   fi
 fi
 
+# Replaying a recorded master. The branch above picks settings from VRAM, which is right
+# for a fresh render and wrong for reproducing one: the 720p master was made at batch 65
+# and no card selects that today. SeedVR2 is deterministic given identical parameters
+# (verified byte-identical across two runs, docs/findings.md), so a manifest plus these
+# overrides is enough to recreate a master exactly.
+if [ -n "${BATCH_SIZE:-}" ] || [ -n "${TEMPORAL_OVERLAP:-}" ]; then
+  B="${BATCH_SIZE:-33}"; T="${TEMPORAL_OVERLAP:-5}"
+  EXTRA="$(echo "$EXTRA" | sed -E "s/--batch_size [0-9]+/--batch_size $B/; s/--temporal_overlap [0-9]+/--temporal_overlap $T/")"
+  echo "### OVERRIDE: batch $B, overlap $T (reproducing a recorded render) ###"
+fi
+
 echo "### running: $MODE at resolution $RES ###"
 time python inference_cli.py "$IN" \
   --output "$OUT" \

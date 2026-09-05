@@ -275,23 +275,27 @@ throwaway pod does not exist in this version, so there is nothing to stop a forg
 billing. Use `--wait --wait-timeout` to block until SSH answers, and arm your own watchdog.
 Also `--gpu-id` wants the `gpuId` (`NVIDIA A40`), not the `displayName` (`A40`).
 
-**SeedVR2 is not reproducible.** Re-rendering the same 1480-frame input at the same
-resolution on the same model produced a different master:
+**SeedVR2 IS deterministic — an earlier entry here said the opposite and was wrong.**
+
+Two renders of the same clip, back to back on one pod, produced **byte-identical output**:
 
 ```
-frames compared      1480
-identical            0
-median PSNR          39.2 dB    (min 31.1 dB)
+resolution, model, extra_args, fixed_args, gpu, torch, seedvr2_commit, input sha256   all identical
+output sha256   40003bbf860a7310f48b32fb23c72577…   (both runs)
 ```
 
-Every frame differs. 39 dB is close enough that the two are probably hard to tell apart by
-eye, but they are not the same file and never will be. The cause was not isolated — a fresh
-SeedVR2 checkout, no seed is passed, and CUDA kernels need not be deterministic.
+The earlier claim came from comparing a fresh batch-33 render against the batch-65 720p
+master and finding all 1480 frames different. That was a parameter difference, not
+nondeterminism — the same mismatched-baseline error CLAUDE.md now warns about, made while
+writing up the previous finding.
 
-The consequence matters more than the cause: **a master cannot be recreated, only kept.**
-That is exactly why `masters/` exists and why its README says every downstream choice can be
-re-run from there for free. Re-deriving one is not a fallback; it produces a different
-starting point.
+What this changes: **a master can be recreated, provided you have its parameters.** That
+makes the manifest the load-bearing artifact rather than the master file itself. It also
+makes `BATCH_SIZE`/`TEMPORAL_OVERLAP` overrides worth having, since the VRAM branch picks
+settings for a fresh render and cannot select the batch 65 the 720p master was built with.
+
+`masters/` still earns its place — it saves the GPU spend and the wait — but it is a cache,
+not an irreplaceable original.
 
 ## All three VRAM branches, measured on hardware 2026-09-04
 

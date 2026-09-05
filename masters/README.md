@@ -27,8 +27,15 @@ comparison — a fresh batch-33 render was measured against the batch-65 720p ma
 difference read as evidence the model is nondeterministic, when the two had simply been
 asked for different things.
 
-**Note the 720p master cannot currently be reproduced at all.** It was made at batch 65,
-and the script's A40 branch hardcodes batch 33, so no card selects those settings today.
+**The 720p master needs an override to reproduce.** It was made at batch 65 and the A40
+branch derives batch 33, so pass the recorded parameters explicitly:
+
+```bash
+BATCH_SIZE=65 TEMPORAL_OVERLAP=5 bash run_on_pod.sh 720 full
+```
+
+SeedVR2 is deterministic given identical parameters — verified byte-identical across two
+runs on one pod — so a manifest plus these overrides recreates a master exactly.
 
 Any master added from here should arrive with its manifest. For the two above, what is
 known is in the table and nothing more is recoverable.

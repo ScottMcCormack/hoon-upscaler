@@ -44,6 +44,7 @@ if [ "${1:-}" = "inference_cli.py" ]; then
   out=""; prev=""
   for a in "$@"; do [ "$prev" = "--output" ] && out="$a"; prev="$a"; done
   echo "  [stub] would upscale $2 -> $out"
+  echo "  [stub] argv: $*"
   [ "${STUB_NO_OUTPUT:-0}" = "1" ] && exit 0          # ran, produced nothing
   ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=s=64x36:r=15:d=30" \
     -frames:v "${STUB_OUT_FRAMES:-214}" -c:v libx264 -crf 30 -pix_fmt yuv420p "$out"
@@ -97,6 +98,18 @@ case "$out" in *"likely to run out of memory"*) ok "vram: 16GB at 720 warns abou
 out="$(STUB_VRAM=16376 run_pod bash "$CLOUD/run_on_pod.sh" 540 test)"
 case "$out" in *"likely to run out of memory"*) bad "vram: 16GB at 540 does not warn" "warned unnecessarily" ;;
   *) ok "vram: 16GB at 540 does not warn" ;; esac
+
+# Reproducing a recorded master means replaying its parameters, not re-deriving them
+# from whatever card you happened to rent.
+out="$(clean; env PATH="$STUB:$PATH" WORKSPACE="$WS" STUB_VRAM=49140 BATCH_SIZE=65 TEMPORAL_OVERLAP=5 \
+  bash "$CLOUD/run_on_pod.sh" 720 test 2>&1)"
+case "$out" in *"OVERRIDE: batch 65"*) ok "override: BATCH_SIZE replaces the VRAM-derived batch" ;;
+  *) bad "override: BATCH_SIZE replaces the VRAM-derived batch" "no override line" ;; esac
+case "$out" in
+  *"[stub] argv:"*"--batch_size 65"*) ok "override: inference is actually invoked with batch 65" ;;
+  *) bad "override: inference is actually invoked with batch 65" \
+       "$(printf '%s' "$out" | grep -o '\-\-batch_size [0-9]*' | tail -1)" ;;
+esac
 
 # --- guards -----------------------------------------------------------------
 clean; assert_stderr_matches "guard: non-integer VRAM is refused" "could not read VRAM" \

@@ -211,3 +211,8 @@ PY
 ls -lh "$OUT"
 echo
 echo "Download $(basename "$OUT") — then TERMINATE the pod (not just stop it)."
+echo
+echo "Before terminating, check nobody else is using it — a pod is not necessarily yours"
+echo "alone, and teardown destroys the local disk:"
+echo "  nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv"
+echo "  ls -lh $(dirname "$OUT")/*.mp4    # is every output actually downloaded?"

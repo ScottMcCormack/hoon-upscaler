@@ -294,6 +294,19 @@ makes the manifest the load-bearing artifact rather than the master file itself.
 makes `BATCH_SIZE`/`TEMPORAL_OVERLAP` overrides worth having, since the VRAM branch picks
 settings for a fresh render and cannot select the batch 65 the 720p master was built with.
 
+**Confirmed against a real master.** The 1080p master, rendered months earlier, was
+reproduced from its recorded parameters:
+
+```
+master  sha256 8412f5bd5d662b03cc70b43f6a428658affae9a24ce9a5e1   273,813,416 bytes
+repro   sha256 8412f5bd5d662b03cc70b43f6a428658affae9a24ce9a5e1   273,813,416 bytes
+```
+
+That is stronger than the two-runs-on-one-pod test, because it clears confounds that test
+could not: `chunk_size`, the cache flags and `color_correction` were unrecorded for that
+master, and the SeedVR2 revision was unknown. A byte-identical result means all of them
+match the script's current values.
+
 `masters/` still earns its place — it saves the GPU spend and the wait — but it is a cache,
 not an irreplaceable original.
 
@@ -342,4 +355,50 @@ batch 65 today.
 
 The general form of this is already in CLAUDE.md: a comparison is only evidence if you can
 state what differs between the two things. A manifest is how you state it after the fact.
+
+## Durable output and A40 availability are currently mutually exclusive
+
+A pod's local disk dies with the pod. A power cut on the controlling machine cost one
+1080 render (~$0.66) because nothing local survived to download it, and the pod was
+orphaned until it was noticed by hand.
+
+The fix is a network volume, which outlives the pod. It cannot be used with an A40:
+
+```
+A40 stock          CA-MTL-1 (Low), EU-SE-1 (none), US-MO-1 (none)
+volume-capable DCs CA-MTL-3, CA-MTL-4, EU-FR-1, EU-NL-1, EU-RO-1, EUR-IS-1, US-MO-2, …
+                   — neither CA-MTL-1 nor EU-SE-1 among them
+```
+
+The cheapest volume-compatible card at 48GB is an RTX 6000 Ada at $0.84/hr against the
+A40's $0.49. But price is not the reason to avoid it: **determinism has only been verified
+within one card.** Cross-GPU determinism is untested, so reproducing an A40-made master on
+a different architecture would confound the result — a mismatch could be floating-point
+kernel differences rather than anything about the pipeline.
+
+The asymmetry is worth remembering: on a different card, a *match* would prove a lot
+(determinism holds across architectures too); a *mismatch* would prove nothing. So use a
+volume for any run that is not reproducing an existing A40 master, and accept the local-disk
+risk for the ones that are.
+
+## A pod is not necessarily yours alone
+
+The runner terminates its pod from an EXIT trap, which is right when the pod exists only
+for that job. It nearly destroyed someone else's work: a second workload was started on the
+same pod, and the trap would have torn it down the moment the first render's download
+finished.
+
+Killing the runner would not have helped — the trap catches INT and TERM. `SIGKILL` was the
+only way to stop it firing.
+
+Before any automatic teardown, check what is actually running:
+
+```bash
+nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv
+pgrep -af inference_cli
+ls -lh /workspace/cloud/*.mp4       # and whether every output has been retrieved
+```
+
+Three finished renders belonging to another job were sitting undownloaded when teardown was
+requested. Terminating would have destroyed them.
 

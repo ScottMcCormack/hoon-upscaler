@@ -13,3 +13,22 @@ hour — with no GPU and no cloud spend.
 
 Regenerating either needs ~$0.50 of rented GPU; regenerating everything downstream
 of them is free.
+
+## Every master needs its parameters beside it
+
+`cloud/run_on_pod.sh` now writes a `.json` manifest next to each render — the full
+argument list, model file, resolution, GPU and VRAM, torch version, the SeedVR2 commit,
+and frame counts plus sha256 for both input and output.
+
+That is not bookkeeping. These two masters were made before the manifest existed, and the
+table above records only batch and overlap: `chunk_size`, the cache flags,
+`color_correction` and the SeedVR2 revision are all unrecorded. It cost a wasted
+comparison — a fresh batch-33 render was measured against the batch-65 720p master and the
+difference read as evidence the model is nondeterministic, when the two had simply been
+asked for different things.
+
+**Note the 720p master cannot currently be reproduced at all.** It was made at batch 65,
+and the script's A40 branch hardcodes batch 33, so no card selects those settings today.
+
+Any master added from here should arrive with its manifest. For the two above, what is
+known is in the table and nothing more is recoverable.

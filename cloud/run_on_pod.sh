@@ -144,6 +144,59 @@ if [ "$OUT_N" -ne "$IN_N" ]; then
   exit 1
 fi
 echo "frame check OK: $OUT_N frames, matching input"
+
+# A manifest beside every master. SeedVR2 is not reproducible in practice, so the
+# parameters are the only durable record of how a given master came to exist - and
+# without them you cannot even tell whether two renders differ because of the model or
+# because they were asked for different things. That question cost a wasted comparison
+# once already.
+MANIFEST="${OUT%.mp4}.json"
+SEEDVR2_COMMIT="$(git -C "$WORKSPACE/SeedVR2" rev-parse HEAD 2>/dev/null || echo unknown)"
+TORCH_VER="$(python -c 'import torch; print(torch.__version__)' 2>/dev/null || echo unknown)"
+GPU_NAME="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"
+MANIFEST="$MANIFEST" IN="$IN" OUT="$OUT" IN_N="$IN_N" OUT_N="$OUT_N" RES="$RES" \
+MODEL="$MODEL" EXTRA="$EXTRA" VRAM="$VRAM" GPU_NAME="$GPU_NAME" \
+SEEDVR2_COMMIT="$SEEDVR2_COMMIT" TORCH_VER="$TORCH_VER" MODE="$MODE" python - <<'PY'
+import hashlib, json, os, subprocess, datetime
+
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+def dims(path):
+    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                          "-show_entries", "stream=width,height", "-of", "csv=p=0", path],
+                         capture_output=True, text=True).stdout.strip()
+    w, _, h = out.partition(",")
+    return {"width": int(w), "height": int(h)}
+
+e = os.environ
+m = {
+    "created_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+    "mode": e["MODE"],
+    "resolution": int(e["RES"]),
+    "model": e["MODEL"],
+    "extra_args": e["EXTRA"].split(),
+    "fixed_args": ["--chunk_size", "370", "--cache_dit", "--cache_vae",
+                   "--color_correction", "wavelet", "--video_backend", "ffmpeg"],
+    "gpu": {"name": e["GPU_NAME"], "vram_mb": int(e["VRAM"])},
+    "torch": e["TORCH_VER"],
+    "seedvr2_commit": e["SEEDVR2_COMMIT"],
+    "input": {"file": os.path.basename(e["IN"]), "frames": int(e["IN_N"]),
+              **dims(e["IN"]), "sha256": sha256(e["IN"])},
+    "output": {"file": os.path.basename(e["OUT"]), "frames": int(e["OUT_N"]),
+               **dims(e["OUT"]), "sha256": sha256(e["OUT"])},
+}
+with open(e["MANIFEST"], "w") as f:
+    json.dump(m, f, indent=2)
+    f.write("\n")
+print(f"    manifest: {os.path.basename(e['MANIFEST'])}"
+      f"  (seedvr2 {m['seedvr2_commit'][:8]}, torch {m['torch']})")
+PY
+
 ls -lh "$OUT"
 echo
 echo "Download $(basename "$OUT") — then TERMINATE the pod (not just stop it)."

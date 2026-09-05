@@ -130,6 +130,22 @@ case "$out" in
   *) bad "happy path: frame check passes" "$(printf '%s' "$out" | tail -2 | head -1)" ;;
 esac
 
+# A master without its parameters cannot be compared against anything later.
+MAN="$CLOUD/sr_test_720.json"
+if [ -f "$MAN" ]; then
+  ok "happy path: writes a parameter manifest"
+  python - "$MAN" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1]))
+need = ["resolution", "model", "extra_args", "gpu", "torch", "seedvr2_commit", "input", "output"]
+missing = [k for k in need if k not in m]
+print("MANIFEST_MISSING=" + (",".join(missing) if missing else "none"))
+print("MANIFEST_SHA=" + ("yes" if m.get("output", {}).get("sha256") else "no"))
+PY
+else
+  bad "happy path: writes a parameter manifest" "no $MAN"
+fi
+
 echo
 if [ "$FAIL" -eq 0 ]; then printf '\033[32m%d passed\033[0m\n' "$PASS"
 else printf '\033[32m%d passed\033[0m, \033[31m%d failed\033[0m\n' "$PASS" "$FAIL"

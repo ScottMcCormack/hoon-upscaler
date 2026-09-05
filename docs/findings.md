@@ -320,3 +320,22 @@ The script now warns before that combination rather than letting someone discove
 paying for setup. A warning, not a refusal: the branch covers 16-22GB and the exact limit
 moves with the card.
 
+## Record the parameters or the render is uninterpretable
+
+Every master needs its full invocation stored beside it. `cloud/run_on_pod.sh` writes a
+`.json` manifest with the argument list, model, resolution, GPU and VRAM, torch version,
+SeedVR2 commit, and frame counts plus sha256 for input and output.
+
+The cost of not having this was concrete. `masters/README.md` recorded batch and overlap
+only, so when a fresh render was compared against the 720p master and every frame differed,
+the obvious reading was that SeedVR2 is nondeterministic. It was not evidence of anything:
+the master is batch 65 and the render was batch 33. Different questions, different answers.
+
+`chunk_size`, the cache flags, `color_correction` and the SeedVR2 revision were unrecorded
+for both existing masters and are not recoverable. The 720p master additionally **cannot be
+reproduced by this script at all** — its A40 branch hardcodes batch 33, so nothing selects
+batch 65 today.
+
+The general form of this is already in CLAUDE.md: a comparison is only evidence if you can
+state what differs between the two things. A manifest is how you state it after the fact.
+

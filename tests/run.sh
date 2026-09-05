@@ -258,7 +258,13 @@ if want cloud; then
   CP="$(printf '%s' "$CLOUD_PLAIN" | grep -cE '^  PASS ' || true)"
   CF="$(printf '%s' "$CLOUD_PLAIN" | grep -cE '^  FAIL ' || true)"
   PASS=$((PASS + CP)); FAIL=$((FAIL + CF))
-  [ "$CLOUD_STATUS" -eq 0 ] || FAILED_NAMES+=("cloud pod runner — see bash tests/cloud_pod.sh")
+  # A child that crashes before printing any FAIL line reports nothing, so counting only
+  # its FAIL lines would let a nonzero exit pass as success. Charge one failure for the
+  # exit status itself when it did not account for one.
+  if [ "$CLOUD_STATUS" -ne 0 ]; then
+    FAILED_NAMES+=("cloud pod runner (exit $CLOUD_STATUS) — see bash tests/cloud_pod.sh")
+    [ "$CF" -eq 0 ] && FAIL=$((FAIL + 1))
+  fi
 fi
 
 echo

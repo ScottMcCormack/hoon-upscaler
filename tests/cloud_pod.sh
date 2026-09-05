@@ -69,7 +69,10 @@ ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=s=64x36:r=15:d=30" 
 
 # Each case must start clean: an output left by a previous case would satisfy the
 # "did inference produce a file?" check and mask a real failure.
-clean() { rm -f "$CLOUD"/sr_*.mp4; }
+# Manifests too, not just videos: the override case writes sr_test_720.json before the
+# happy-path manifest check runs, so a stale one would satisfy that check even if the
+# happy path stopped producing it.
+clean() { rm -f "$CLOUD"/sr_*.mp4 "$CLOUD"/sr_*.json; }
 
 run_pod() {  # env... -- args...
   clean
@@ -111,6 +114,17 @@ case "$out" in
        "$(printf '%s' "$out" | grep -o '\-\-batch_size [0-9]*' | tail -1)" ;;
 esac
 
+# Setting one override must not disturb the other. This silently rewrote batch 17 to 33
+# on a 24GB card when only TEMPORAL_OVERLAP was given.
+out="$(clean; env PATH="$STUB:$PATH" WORKSPACE="$WS" STUB_VRAM=24564 TEMPORAL_OVERLAP=7 \
+  bash "$CLOUD/run_on_pod.sh" 720 test 2>&1)"
+case "$out" in
+  *"[stub] argv:"*"--batch_size 17"*"--temporal_overlap 7"*)
+    ok "override: a lone TEMPORAL_OVERLAP keeps the card-derived batch 17" ;;
+  *) bad "override: a lone TEMPORAL_OVERLAP keeps the card-derived batch 17" \
+       "$(printf '%s' "$out" | grep -o '\-\-batch_size [0-9]*' | tail -1)" ;;
+esac
+
 # --- guards -----------------------------------------------------------------
 clean; assert_stderr_matches "guard: non-integer VRAM is refused" "could not read VRAM" \
   env PATH="$STUB:$PATH" WORKSPACE="$WS" STUB_VRAM="[N/A]" bash "$CLOUD/run_on_pod.sh" 720 test
@@ -145,18 +159,33 @@ esac
 
 # A master without its parameters cannot be compared against anything later.
 MAN="$CLOUD/sr_test_720.json"
-if [ -f "$MAN" ]; then
-  ok "happy path: writes a parameter manifest"
-  python - "$MAN" <<'PY'
-import json, sys
-m = json.load(open(sys.argv[1]))
-need = ["resolution", "model", "extra_args", "gpu", "torch", "seedvr2_commit", "input", "output"]
-missing = [k for k in need if k not in m]
-print("MANIFEST_MISSING=" + (",".join(missing) if missing else "none"))
-print("MANIFEST_SHA=" + ("yes" if m.get("output", {}).get("sha256") else "no"))
-PY
+if [ ! -f "$MAN" ]; then
+  bad "manifest: written beside the render" "no $MAN"
 else
-  bad "happy path: writes a parameter manifest" "no $MAN"
+  ok "manifest: written beside the render"
+  # Assert, do not merely print. An empty object used to pass this.
+  VERDICT="$(python - "$MAN" <<'PY'
+import json, sys
+try:
+    m = json.load(open(sys.argv[1]))
+except Exception as e:
+    print(f"unreadable: {e}"); raise SystemExit
+need = ["resolution", "model", "extra_args", "fixed_args", "gpu", "torch",
+        "seedvr2_commit", "input", "output"]
+missing = [k for k in need if k not in m]
+for side in ("input", "output"):
+    if not m.get(side, {}).get("sha256"):
+        missing.append(f"{side}.sha256")
+    if not m.get(side, {}).get("frames"):
+        missing.append(f"{side}.frames")
+print("ok" if not missing else "missing: " + ", ".join(missing))
+PY
+)"
+  if [ "$VERDICT" = "ok" ]; then
+    ok "manifest: carries the full invocation and both checksums"
+  else
+    bad "manifest: carries the full invocation and both checksums" "$VERDICT"
+  fi
 fi
 
 echo

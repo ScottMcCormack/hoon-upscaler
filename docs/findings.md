@@ -349,9 +349,13 @@ the obvious reading was that SeedVR2 is nondeterministic. It was not evidence of
 the master is batch 65 and the render was batch 33. Different questions, different answers.
 
 `chunk_size`, the cache flags, `color_correction` and the SeedVR2 revision were unrecorded
-for both existing masters and are not recoverable. The 720p master additionally **cannot be
-reproduced by this script at all** — its A40 branch hardcodes batch 33, so nothing selects
-batch 65 today.
+for both existing masters. That turned out not to matter — the 1080p master reproduced
+byte-for-byte, so all of them match the script's current values — but it was not knowable
+in advance, which is the point.
+
+The 720p master needs `BATCH_SIZE=65` passed explicitly, since the A40 branch derives batch
+33 and nothing selects 65 from VRAM alone. That override exists precisely because the
+branch chooses for a *fresh* render and reproducing one is a different job.
 
 The general form of this is already in CLAUDE.md: a comparison is only evidence if you can
 state what differs between the two things. A manifest is how you state it after the fact.

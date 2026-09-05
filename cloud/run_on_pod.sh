@@ -110,11 +110,16 @@ fi
 
 # Replaying a recorded master. The branch above picks settings from VRAM, which is right
 # for a fresh render and wrong for reproducing one: the 720p master was made at batch 65
-# and no card selects that today. SeedVR2 is deterministic given identical parameters
-# (verified byte-identical across two runs, docs/findings.md), so a manifest plus these
-# overrides is enough to recreate a master exactly.
+# and no card selects that today. SeedVR2 is deterministic given identical parameters -
+# verified twice, including a byte-for-byte recreation of the 1080p master months after
+# it was made - so a manifest plus these overrides recreates a master exactly.
 if [ -n "${BATCH_SIZE:-}" ] || [ -n "${TEMPORAL_OVERLAP:-}" ]; then
-  B="${BATCH_SIZE:-33}"; T="${TEMPORAL_OVERLAP:-5}"
+  # Fall back to what the VRAM branch just chose, NOT to the 48GB defaults. Otherwise
+  # setting one override silently rewrites the other: TEMPORAL_OVERLAP=5 on a 24GB card
+  # would move batch 17 to 33, quietly changing the render the caller did not ask about.
+  CUR_B="$(printf '%s' "$EXTRA" | grep -oE -- '--batch_size [0-9]+' | grep -oE '[0-9]+')"
+  CUR_T="$(printf '%s' "$EXTRA" | grep -oE -- '--temporal_overlap [0-9]+' | grep -oE '[0-9]+')"
+  B="${BATCH_SIZE:-$CUR_B}"; T="${TEMPORAL_OVERLAP:-$CUR_T}"
   EXTRA="$(echo "$EXTRA" | sed -E "s/--batch_size [0-9]+/--batch_size $B/; s/--temporal_overlap [0-9]+/--temporal_overlap $T/")"
   echo "### OVERRIDE: batch $B, overlap $T (reproducing a recorded render) ###"
 fi
@@ -156,9 +161,10 @@ if [ "$OUT_N" -ne "$IN_N" ]; then
 fi
 echo "frame check OK: $OUT_N frames, matching input"
 
-# A manifest beside every master. SeedVR2 is not reproducible in practice, so the
-# parameters are the only durable record of how a given master came to exist - and
-# without them you cannot even tell whether two renders differ because of the model or
+# A manifest beside every master. SeedVR2 IS reproducible given identical parameters -
+# the 1080p master was recreated byte-for-byte months later - which is exactly why the
+# parameters must be recorded: they are the whole of what makes a render repeatable.
+# Without them you cannot even tell whether two renders differ because of the model or
 # because they were asked for different things. That question cost a wasted comparison
 # once already.
 MANIFEST="${OUT%.mp4}.json"

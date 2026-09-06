@@ -416,3 +416,38 @@ ls -lh /workspace/cloud/*.mp4        # is every output actually downloaded?
 The general lesson is not about traps. Automatic cleanup has to establish that it owns the
 thing it is cleaning up, and a rented pod is shared infrastructure the moment anyone else
 touches it.
+
+## Argument validation, reviewed adversarially 2026-09-06
+
+An adversarial review of `cloud/run_on_pod.sh` found five accepted-but-wrong inputs. Four
+cost money or credibility rather than crashing, which is why none had been noticed.
+
+**The two guards were written in the same commit, to different standards.** The override
+validation says `[[ "$val" =~ ^[0-9]+$ ]] && [ "$val" -gt 0 ]`. The resolution guard,
+twenty lines away, says only `[[ "$RES" =~ ^[0-9]+$ ]]` — while printing "must be a
+positive integer" when it fails. So `run_on_pod.sh 0 test` ran to completion. It did not
+error; it produced a render and a manifest recording `"resolution": 0`. The manifest work
+exists to make renders interpretable, and here it faithfully recorded a setting that was
+never meant to be reachable.
+
+Having written the stricter form once is not evidence it was applied everywhere. Grep for
+the standard, not for whether the idea occurred to you.
+
+**`${2:-full}` cannot distinguish an omitted argument from an empty one.** Omitting the
+mode meaning "full" is deliberate and documented. But a wrapper passing through an unset
+variable arrives as an empty string and gets the same answer — and the answer is the
+chargeable full render rather than the 15-second test. A default that is merely wrong is
+a bug; a default that is wrong and bills for it is the one worth guarding. Empty is now
+refused. The documented default was left alone: it is an interface, not a defect.
+
+**Batch overrides were only guarded downward.** The OOM warning keys on resolution, but
+VRAM is driven by batch width too, and overriding upward is exactly what reproducing the
+720p master's batch 65 on a smaller card requires. The guard existed on one side of a
+cliff that has two.
+
+A methodological note, from getting it wrong during the same session: the five new tests
+were mutation-checked by reverting the script and confirming each one fails. That is the
+right check, but it was run against the shared working tree while a second review agent
+was executing the same suite, which killed its run mid-flight and made its results
+unusable. Mutation testing mutates shared state. Do it in a worktree or a copy when
+anything else is reading the tree.

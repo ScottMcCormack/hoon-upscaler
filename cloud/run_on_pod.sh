@@ -19,11 +19,27 @@
 #         bash run_on_pod.sh 1080           # if 720 looks good and you're curious
 # ============================================================================
 set -euo pipefail
+case "${1:-}" in
+  -h|--help)
+    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0 ;;
+esac
+# Reject extra arguments rather than ignoring them: a mistyped invocation should say so,
+# not quietly run something adjacent to what was meant.
+[ "$#" -le 2 ] || { echo "!! unexpected extra argument(s): ${*:3}"; exit 1; }
 RES="${1:-720}"
 # Same reasoning as the VRAM guard below: a non-integer here makes `[ "$RES" -ge 720 ]`
 # error inside an `if`, which set -e does not catch, so the low-VRAM OOM warning would
 # silently never fire. It would then die much later in the manifest, after inference.
-[[ "$RES" =~ ^[0-9]+$ ]] || { echo "!! resolution must be a positive integer, got: '$RES'"; exit 1; }
+[[ "$RES" =~ ^[0-9]+$ ]] && [ "$RES" -gt 0 ] || {
+  echo "!! resolution must be a positive integer, got: '$RES'"; exit 1; }
+# Omitting the mode means "full", as the header documents. An explicitly EMPTY mode is
+# different: that is a wrapper passing through an unset variable, and ${2:-full} would
+# silently hand it the chargeable full render. Refuse rather than guess, same as an
+# unknown mode below.
+if [ "$#" -ge 2 ] && [ -z "$2" ]; then
+  echo "!! mode was given but empty. Pass 'test' or 'full' explicitly."; exit 1
+fi
 MODE="${2:-full}"
 case "$MODE" in
   test|full) ;;
@@ -139,6 +155,14 @@ if [ -n "${BATCH_SIZE:-}" ] || [ -n "${TEMPORAL_OVERLAP:-}" ]; then
   [ -n "${BATCH_SIZE:-}" ] || [ -n "$CUR_B" ] || { echo "!! no --batch_size in EXTRA to override"; exit 1; }
   [ -n "${TEMPORAL_OVERLAP:-}" ] || [ -n "$CUR_T" ] || { echo "!! no --temporal_overlap in EXTRA to override"; exit 1; }
   B="${BATCH_SIZE:-$CUR_B}"; T="${TEMPORAL_OVERLAP:-$CUR_T}"
+  # The OOM warning above keys on resolution, but batch width drives VRAM too. Overriding
+  # upward past what this card's branch chose walks toward the same cliff from the other
+  # side — e.g. the 720p master's batch 65 on a 24GB card, which derived 17.
+  if [ -n "$CUR_B" ] && [ "$B" -gt "$CUR_B" ]; then
+    echo "!! WARNING: batch $B is above the $CUR_B this card's VRAM selected."
+    echo "   Overriding upward is how you reproduce a master made on a bigger card; it is"
+    echo "   also how you run out of memory. If it dies with OutOfMemoryError, that is why."
+  fi
   EXTRA="$(echo "$EXTRA" | sed -E "s/--batch_size [0-9]+/--batch_size $B/; s/--temporal_overlap [0-9]+/--temporal_overlap $T/")"
   echo "### OVERRIDE: batch $B, overlap $T (reproducing a recorded render) ###"
 fi

@@ -161,6 +161,42 @@ done
 clean; assert_stderr_matches "guard: a non-integer resolution is refused" "resolution must be a positive integer" \
   env PATH="$STUB:$PATH" WORKSPACE="$WS" bash "$CLOUD/run_on_pod.sh" 1080p test
 
+# 0 matched ^[0-9]+$ and sailed through a check whose own message said "positive", while
+# the override validation twenty lines away already required > 0. The manifest then
+# recorded "resolution": 0 as though it were a real render setting.
+clean; assert_stderr_matches "guard: a zero resolution is refused" "resolution must be a positive integer" \
+  env PATH="$STUB:$PATH" WORKSPACE="$WS" bash "$CLOUD/run_on_pod.sh" 0 test
+
+# Omitting the mode means "full" and is documented that way. Passing an EMPTY mode is a
+# wrapper leaking an unset variable, and ${2:-full} silently gave it the chargeable
+# render — the one default whose cost makes guessing unacceptable.
+clean; assert_stderr_matches "guard: an explicitly empty mode is refused" "mode was given but empty" \
+  env PATH="$STUB:$PATH" WORKSPACE="$WS" bash "$CLOUD/run_on_pod.sh" 720 ""
+
+# A third argument used to be ignored, so a typo'd flag ran the default render instead.
+clean; assert_stderr_matches "guard: extra arguments are refused" "unexpected extra argument" \
+  env PATH="$STUB:$PATH" WORKSPACE="$WS" bash "$CLOUD/run_on_pod.sh" 720 test --dry-run
+
+# --help hit the resolution guard and answered "must be a positive integer", which reads
+# as though the script were broken rather than as usage.
+clean
+HELP="$(env PATH="$STUB:$PATH" WORKSPACE="$WS" bash "$CLOUD/run_on_pod.sh" --help 2>&1)"; HST=$?
+if [ "$HST" -eq 0 ] && [[ "$HELP" == *"test_15s.mp4"* ]] && [[ "$HELP" != *"positive integer"* ]]; then
+  ok "--help prints usage and exits 0"
+else
+  bad "--help prints usage and exits 0" "exit $HST: $(printf '%s' "$HELP" | tail -1)"
+fi
+
+# Overriding batch upward is legitimate — it is how the 720p master gets reproduced on a
+# smaller card — but it walks toward the VRAM cliff, so it must say so.
+clean
+UP="$(env PATH="$STUB:$PATH" WORKSPACE="$WS" BATCH_SIZE=65 \
+  bash "$CLOUD/run_on_pod.sh" 720 test 2>&1)" || true
+case "$UP" in
+  *"is above the"*) ok "override: raising batch past the card's own choice warns" ;;
+  *) bad "override: raising batch past the card's own choice warns" "no warning: $(printf '%s' "$UP" | tail -1)" ;;
+esac
+
 # --- guards -----------------------------------------------------------------
 clean; assert_stderr_matches "guard: non-integer VRAM is refused" "could not read VRAM" \
   env PATH="$STUB:$PATH" WORKSPACE="$WS" STUB_VRAM="[N/A]" bash "$CLOUD/run_on_pod.sh" 720 test

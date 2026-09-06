@@ -192,11 +192,57 @@ SRC_SPAN=$(cat "$W/span.txt")
 EXPECT60=$(python -c "print(round($SRC_SPAN * 60))")
 echo "    target $EXPECT60 frames (video spans ${SRC_SPAN}s)"
 
+# Which interpolator. minterpolate searches for motion within search_param pixels
+# (default 32) and warps the picture along whatever vector it finds; on footage that pans
+# faster than that window it finds the wrong one and the result flows rather than moves.
+# Raising the search range does not fix it - at 250, zero frames were beyond range and it
+# was still wrong - because the failure is block compensation stretching into newly
+# revealed areas, not the search. RIFE synthesises those instead.
+#
+# auto measures and picks. minterpolate stays the default where it works, since RIFE needs
+# a CUDA torch and a model that this repo does not vendor.
+INTERP="${INTERP:-auto}"
+case "$INTERP" in
+  auto|minterpolate|rife) ;;
+  *) echo "!! unknown INTERP '$INTERP' - expected auto, minterpolate or rife"; exit 1 ;;
+esac
+if [ "$INTERP" = "auto" ]; then
+  INTERP="$(python "$HERE/rife.py" recommend "$OUT_DIR/${TAG}_lumafix_14fps.mp4")"
+  echo "    auto -> $INTERP  ($(python "$HERE/rife.py" measure "$OUT_DIR/${TAG}_lumafix_14fps.mp4"))"
+  if [ "$INTERP" = "rife" ] && ! python -c "
+import sys; sys.path.insert(0,'$HERE'); import rife; sys.exit(0 if rife.available() else 1)"; then
+    echo "    !! this footage wants RIFE but it is not set up (see pipeline/rife.py)."
+    echo "       Falling back to minterpolate; expect warping through the fast passages."
+    INTERP=minterpolate
+  fi
+fi
+
 # Interpolate from the GRADED render — the selective pass pulls held frames from it, and
 # mixing graded with ungraded puts a ~10-17 luma step at every hold boundary.
-ffmpeg -y -v error -i "$OUT_DIR/${TAG}_lumafix_14fps.mp4" \
-  -vf "tpad=stop=8:stop_mode=clone,minterpolate=fps=60:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1:scd=none,trim=end_frame=$EXPECT60,setpts=PTS-STARTPTS" \
-  -c:v libx264 -preset fast -crf 12 -an "$W/i60.mp4"
+if [ "$INTERP" = "rife" ]; then
+  # Forced, not auto-selected: refuse rather than silently producing the output the
+  # caller explicitly asked not to have.
+  if ! python -c "
+import sys; sys.path.insert(0,'$HERE'); import rife; sys.exit(0 if rife.available() else 1)"; then
+    echo "!! INTERP=rife but RIFE is not set up. Expected a venv and model weights under" >&2
+    echo "   ${RIFE_HOME:-$REPO/work/rife} - see the setup notes in pipeline/rife.py." >&2
+    exit 1
+  fi
+  RIFE_PY="${RIFE_HOME:-$REPO/work/rife}/venv/bin/python"
+  [ -x "$RIFE_PY" ] || RIFE_PY=python
+  "$RIFE_PY" "$HERE/rife.py" interpolate \
+    "$OUT_DIR/${TAG}_lumafix_14fps.mp4" "$W/i60_raw.mp4" 4 1.0
+  # RIFE emits (n-1)*4+1: there is nothing past the last source frame to interpolate
+  # into. Same tail as minterpolate, so the same fix - clone, then trim to the count the
+  # SOURCE timestamps imply rather than to whatever the render happened to produce.
+  ffmpeg -y -v error -i "$W/i60_raw.mp4" \
+    -vf "tpad=stop=8:stop_mode=clone,trim=end_frame=$EXPECT60,setpts=PTS-STARTPTS" \
+    -c:v libx264 -preset fast -crf 12 -an "$W/i60.mp4"
+else
+  ffmpeg -y -v error -i "$OUT_DIR/${TAG}_lumafix_14fps.mp4" \
+    -vf "tpad=stop=8:stop_mode=clone,minterpolate=fps=60:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1:scd=none,trim=end_frame=$EXPECT60,setpts=PTS-STARTPTS" \
+    -c:v libx264 -preset fast -crf 12 -an "$W/i60.mp4"
+fi
 I60_N=$(ffprobe -v error -select_streams v:0 -count_packets -show_entries stream=nb_read_packets -of csv=p=0 "$W/i60.mp4")
 echo "    interpolated $I60_N frames"
 if [ "$I60_N" -ne "$EXPECT60" ]; then

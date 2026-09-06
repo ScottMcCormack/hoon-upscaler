@@ -625,6 +625,59 @@ PY
 fi
 
 # ---------------------------------------------------------------------------
+# Interpolator selection. minterpolate's 32px motion search is too small for footage
+# that pans; the choice between it and RIFE is made from a measurement. Only the
+# selection and the guards are tested - running RIFE needs a CUDA torch and model
+# weights that this repo does not vendor, so the model itself is out of scope here.
+# ---------------------------------------------------------------------------
+echo
+echo "interpolation"
+
+if want interp; then
+  R="$REPO/pipeline/rife.py"
+
+  # The padding multiple is derived from scale, not from the network stride. Getting it
+  # wrong fails deep inside the flow blocks, so it is worth pinning.
+  assert_eq "interp: pad multiple at scale 1.0"  "128" "$(python -c "import sys;sys.path.insert(0,'$REPO/pipeline');import rife;print(rife.pad_to(1.0))")"
+  assert_eq "interp: pad multiple at scale 0.5"  "256" "$(python -c "import sys;sys.path.insert(0,'$REPO/pipeline');import rife;print(rife.pad_to(0.5))")"
+  assert_stderr_matches "interp: an unsupported scale is refused" "scale must be one of" \
+    python -c "import sys;sys.path.insert(0,'$REPO/pipeline');import rife;rife.pad_to(0.7)"
+
+  # A near-static clip must not pull in a GPU dependency it does not need; a fast-panning
+  # one must not silently get the interpolator that warps it.
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=s=256x144:r=15:d=3" \
+    -frames:v 40 -c:v libx264 -crf 20 -pix_fmt yuv420p "$W/static.mp4"
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=s=1024x576:r=15:d=3" \
+    -vf "crop=256:144:'min(iw-256,n*90)':100" -frames:v 40 -fps_mode passthrough \
+    -c:v libx264 -crf 20 -pix_fmt yuv420p "$W/panning.mp4"
+  assert_eq "interp: a near-static clip picks minterpolate" \
+    "minterpolate" "$(python "$R" recommend "$W/static.mp4" 2>/dev/null)"
+  assert_eq "interp: a fast-panning clip picks rife" \
+    "rife" "$(python "$R" recommend "$W/panning.mp4" 2>/dev/null)"
+
+  # An unknown INTERP must not fall through to a default the caller did not ask for.
+  SRC="$W/isrc.mp4"; RAW="$W/iraw.mp4"; IOUT="$W/iout"; mkdir -p "$IOUT"
+  mk_vfr_source "$SRC" 40 5 8
+  mk_upscaled "$RAW" "$(frame_count "$SRC")"
+  clean_iout() { rm -rf "$IOUT"; mkdir -p "$IOUT"; }
+  clean_iout; assert_stderr_matches "interp: an unknown INTERP is refused" "unknown INTERP" \
+    env INTERP=bogus bash "$REPO/pipeline/finish.sh" "$RAW" I "$SRC" "$IOUT"
+
+  # Forcing rife when it is not installed must refuse, not quietly produce the output the
+  # caller explicitly asked not to have.
+  clean_iout; assert_stderr_matches "interp: forced rife without a setup is refused" \
+    "RIFE is not set up" \
+    env INTERP=rife RIFE_HOME="$W/no-such-rife" bash "$REPO/pipeline/finish.sh" "$RAW" I "$SRC" "$IOUT"
+
+  # ...and auto must fall BACK rather than fail, since minterpolate still produces
+  # something watchable for most footage.
+  clean_iout
+  out="$(env INTERP=minterpolate bash "$REPO/pipeline/finish.sh" "$RAW" I "$SRC" "$IOUT" 2>&1)"
+  if [ -f "$IOUT/I_lumafix_K5.mp4" ]; then ok "interp: explicit minterpolate still completes"
+  else bad "interp: explicit minterpolate still completes" "$(printf '%s' "$out" | tail -1)"; fi
+fi
+
+# ---------------------------------------------------------------------------
 # The cloud runner, driven against stubs. Separate file because it fakes an entire
 # environment; run from here so it is not forgotten.
 # ---------------------------------------------------------------------------

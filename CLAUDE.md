@@ -89,6 +89,12 @@ computed where the effect should not appear — catches most of it.
 - **Disable rotation in stabilisation** (`maxangle=0`). Handheld shake is nearly all
   translation; rotation fitting chases noise and produces a swimming picture.
 - **No `unsharp` in the grade.** It rings on high-contrast lettering.
+- **Match the interpolator to the motion.** `minterpolate` searches 32px by default and
+  warps the picture when the true motion is outside that. Fine at 39px p95 block motion
+  (N90), glassy at 130px (Canon skidpan). Raising the search range does not fix it —
+  measured at zero frames beyond range and still wrong. `finish.sh` picks by measurement;
+  RIFE handles the fast case. Neither fixes baked-in motion blur, which is a reason to
+  drop the output frame rate rather than to change interpolator.
 - **Never grade with a fixed contrast pivot.** `eq=contrast` expands around 128, so its
   effect depends on where the clip sits. The one hardcoded grade clipped 51.8% of a
   daylight clip to white and crushed 3.5% of a night clip to black. Turning it down does

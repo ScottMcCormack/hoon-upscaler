@@ -31,10 +31,16 @@ source (352×288, VFR, heavily compressed)
   ├─ 5. luma stabilise     removes the camera's auto-exposure hunting
   ├─ 6. restore cadence    rebuild per-frame durations (±13ms, see #2)
   ├─ 7. grade              preset picked from the clip's own luma, then verified
-  └─ 8. selective 60fps    interpolate normal gaps, hold through camera stalls
+  └─ 8. selective 60fps    interpolator picked from measured motion; holds through stalls
 ```
 
 Steps 5-8 are automated by `pipeline/finish.sh`.
+
+Step 8 picks its interpolator by measurement. `minterpolate` searches 32px for each
+block's motion and warps the picture when the real motion is further than that — fine on
+near-static footage (39px p95 block motion), and visibly wrong on a clip that pans
+(130px). Raising the search range does not help; RIFE does. `INTERP=minterpolate|rife|auto`
+overrides the choice, and RIFE needs a one-off setup described in `pipeline/rife.py`.
 
 ## Setup
 

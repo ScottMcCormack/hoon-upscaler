@@ -26,6 +26,7 @@ one without listing it here fails the suite.
 
 - [Motion and timing](#motion-and-timing)
 - [Interpolation and stall handling — five things ruled out, 2026-09-03](#interpolation-and-stall-handling--five-things-ruled-out-2026-09-03)
+- [minterpolate cannot interpolate a fast pan, 2026-09-06](#minterpolate-cannot-interpolate-a-fast-pan-2026-09-06)
 
 **Grading**
 
@@ -932,3 +933,76 @@ The lesson is not about grading. **A fix aimed at one hole should be checked aga
 class of hole, not the instance reported.** "Scan everything" answered the sampling gap and
 read like a general answer, which is why the averaging gap survived it - and why the
 write-up claimed a completeness the code did not have.
+
+## minterpolate cannot interpolate a fast pan, 2026-09-06
+
+The 60fps deliverable for MVI_0081 looked "glassy" — the picture flowing rather than
+moving. Reported by eye, and the two qualifiers in the report were what located it:
+*only in the 60fps version*, and *worst in the first five seconds*.
+
+Both followed from one measurement. `minterpolate` searches for each block's motion within
+`search_param` pixels, default **32**, and that default had never been sized against
+footage that pans:
+
+```
+                       block motion p95     frames beyond a 32px search
+N90 clip (fine)              39px                     ~5%
+MVI_0081 (glassy)           130px                    32.4%   (60% of the first 5s)
+```
+
+At 15fps the frames are the model's own, so nothing is synthesised and nothing warps —
+which is exactly why the artifact exists only at 60.
+
+### Raising the search range does not fix it
+
+```
+search  32   276/851 frames beyond range
+search 200     6/851
+search 250 + trimming the opening second     0/851  -- and still glassy
+```
+
+Zero frames beyond range and the artifact remains, which rules the search range out as the
+mechanism. Also ruled out: `me=umh` at search 400 (no improvement, added noise around the
+subject, ~50 minutes per 5 seconds of output), and `mi_mode=blend`, which is not a softer
+60fps but 14fps with extra steps — blending frames 66ms and 100px apart gives a double
+image, and the eye reads a double image as one judder rather than two positions.
+
+Two things remain, neither reachable by any parameter:
+
+- **Occlusion.** At speed, 8.35% of the frame width is newly revealed each frame. That
+  content has no correspondence in the previous frame, so block compensation stretches
+  neighbours into it.
+- **Baked-in motion blur.** Gradient energy along the motion direction falls to 0.52 of
+  the perpendicular at speed. A 66ms exposure shown at 16ms intervals is a mismatch no
+  interpolator removes.
+
+### RIFE fixes the first; nothing fixes the second
+
+RIFE v4.25 synthesises intermediate frames rather than warping blocks, and resolved it.
+On the local RTX 5060 Ti: **3405 frames in 2m42s**, no rented GPU.
+
+`scale` inverts — lower estimates flow on a coarser pyramid and handles larger motion. By
+eye 0.5 and 1.0 were indistinguishable, so it was settled on step evenness, which is
+objective *within one method*: the four steps between each pair of source frames should be
+equal.
+
+```
+RIFE scale 0.5    within-group CV 0.0913
+RIFE scale 1.0    within-group CV 0.0653   <- chosen
+```
+
+That statistic cannot compare across methods. `minterpolate` scores *better* than both
+(0.0490) and looks worst, because evenly spaced warped frames still score well. It ranks
+spacing, not quality.
+
+### Two traps worth recording
+
+**A partial file is not a small file.** `mi_umh.mp4` appeared at 1.0MB against 2.3MB for
+the same content, and that was read as fewer artifacts. It was a render still in progress.
+The frame count says so immediately and the byte count never does — the same lesson as the
+truncated inference output already in CLAUDE.md, arrived at from the other direction.
+
+**Two fixes were tested separately and only worked together.** Trimming the opening was
+measured against the 32px threshold, where it moves 32.4% to 31.1% — negligible, and
+reported as such. Against the 200px threshold it removes 4 of the 6 remaining bad frames.
+Useless alone, near-complete in combination.

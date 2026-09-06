@@ -30,7 +30,7 @@ source (352×288, VFR, heavily compressed)
   ├─ 4. SeedVR2 upscale    3B fp16, resolution 1080, batch 33, overlap 5
   ├─ 5. luma stabilise     removes the camera's auto-exposure hunting
   ├─ 6. restore cadence    rebuild per-frame durations (±13ms, see #2)
-  ├─ 7. grade              contrast 1.20 / saturation 1.28 / gamma 0.96, no unsharp
+  ├─ 7. grade              preset picked from the clip's own luma, then verified
   └─ 8. selective 60fps    interpolate normal gaps, hold through camera stalls
 ```
 
@@ -116,6 +116,16 @@ bash pipeline/finish.sh raw_upscaled.mp4 MyClip in.mp4
 ```
 
 Produces `MyClip_lumafix_14fps.mp4`, `_14fps_ungraded.mp4` and `_lumafix_K5.mp4` (60fps).
+
+The grade is chosen from the clip rather than fixed, because a fixed one is only right for
+footage that happens to sit where it was tuned. `eq=contrast` expands around a pivot of 128:
+the same grade that suited a night clip averaging 140 clipped **51.8%** of a daylight clip
+averaging 208 to flat white. `finish.sh` measures the render, picks a preset, and then
+checks that grading did not add clipping — including when you override it:
+
+```bash
+GRADE="curves=all='0/0 0.5/0.49 1/0.99'" bash pipeline/finish.sh ...
+```
 
 ## Scripts
 

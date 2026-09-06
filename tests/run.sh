@@ -366,6 +366,66 @@ if want repository; then
 fi
 
 # ---------------------------------------------------------------------------
+# Grading. The old fixed grade clipped 51.8% of a bright clip to white and crushed
+# 3.5% of a dark one to black, because eq's contrast pivot is fixed at 128 and the
+# footage is not. Only clipping is asserted here - it has an objective definition.
+# Whether a grade LOOKS right stays an eye call, per the header of this file.
+# ---------------------------------------------------------------------------
+echo
+echo "grading"
+
+if want grade; then
+  G="$REPO/pipeline/grade.py"
+  # A bright clip pinned to white, a dark one pinned to black, and one that is neither.
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "color=c=white:s=64x36:r=15:d=2" \
+    -vf "geq=lum='240+15*sin(X/3)':cb=128:cr=128" -frames:v 30 -pix_fmt yuv420p "$W/bright.mp4"
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "color=c=black:s=64x36:r=15:d=2" \
+    -vf "geq=lum='max(0,8*sin(X/3))':cb=128:cr=128" -frames:v 30 -pix_fmt yuv420p "$W/dark.mp4"
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "color=c=gray:s=64x36:r=15:d=2" \
+    -frames:v 30 -pix_fmt yuv420p "$W/mid.mp4"
+
+  assert_eq "grade: a clip pinned to white picks the bright preset" \
+    "bright" "$(python "$G" pick "$W/bright.mp4" --name 2>/dev/null)"
+  assert_eq "grade: a clip pinned to black picks the dark preset" \
+    "dark" "$(python "$G" pick "$W/dark.mp4" --name 2>/dev/null)"
+  assert_eq "grade: a clip on neither rail picks neutral" \
+    "neutral" "$(python "$G" pick "$W/mid.mp4" --name 2>/dev/null)"
+
+  # The guard is the point of the whole change: it must reject the grade that shipped.
+  ffmpeg -hide_banner -loglevel error -y -i "$W/bright.mp4" \
+    -vf "eq=contrast=1.20:saturation=1.28:gamma=0.96" -pix_fmt yuv420p "$W/bad.mp4"
+  assert_stderr_matches "grade: the guard rejects a grade that clips" "destroying picture" \
+    python "$G" verify "$W/bright.mp4" "$W/bad.mp4"
+
+  ffmpeg -hide_banner -loglevel error -y -i "$W/bright.mp4" \
+    -vf "$(python "$G" pick "$W/bright.mp4")" -pix_fmt yuv420p "$W/good.mp4"
+  if python "$G" verify "$W/bright.mp4" "$W/good.mp4" >/dev/null 2>&1
+  then ok "grade: the guard passes the chosen preset"
+  else bad "grade: the guard passes the chosen preset" "chosen preset failed its own check"; fi
+
+  # An explicit GRADE must win over the derived one...
+  SRC="$W/gsrc.mp4"; RAW="$W/graw.mp4"; GOUT="$W/gout"; mkdir -p "$GOUT"
+  mk_vfr_source "$SRC" 40 5 8
+  mk_upscaled "$RAW" "$(frame_count "$SRC")"
+  # Capture, then match. Piping into `grep -q` looks equivalent and is not: grep exits
+  # on the first match, finish.sh takes SIGPIPE, and `pipefail` reports the pipeline as
+  # failed even though the assertion held.
+  out="$(GRADE="eq=saturation=1.0" bash "$REPO/pipeline/finish.sh" "$RAW" G "$SRC" "$GOUT" 2>&1)"
+  case "$out" in
+    *"grade: explicit"*) ok "grade: finish.sh honours an explicit GRADE" ;;
+    *) bad "grade: finish.sh honours an explicit GRADE" "$(printf '%s' "$out" | tail -1)" ;;
+  esac
+
+  # ...and must still be checked. Setting GRADE is not a licence to destroy the picture.
+  rm -rf "$GOUT"; mkdir -p "$GOUT"
+  out="$(GRADE="eq=contrast=4.0" bash "$REPO/pipeline/finish.sh" "$RAW" G "$SRC" "$GOUT" 2>&1)"
+  case "$out" in
+    *"destroying picture"*) ok "grade: an explicit GRADE is still checked" ;;
+    *) bad "grade: an explicit GRADE is still checked" "a 4x contrast grade was accepted" ;;
+  esac
+fi
+
+# ---------------------------------------------------------------------------
 # The cloud runner, driven against stubs. Separate file because it fakes an entire
 # environment; run from here so it is not forgotten.
 # ---------------------------------------------------------------------------

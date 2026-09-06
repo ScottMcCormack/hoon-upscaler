@@ -615,3 +615,74 @@ output from the same `testsrc2` at the same settings as the input, so the two fi
 byte-identical, and a bug recording the input's hash for the output would have been
 invisible. The stub now emits a different pattern at a different size, which is also what a
 real upscale does.
+
+## The grade was clipping half the picture, 2026-09-06
+
+`finish.sh` hardcoded `eq=contrast=1.20:saturation=1.28:gamma=0.96`. `eq`'s contrast
+expands around a **fixed pivot of 128**, so what it does to a clip depends entirely on
+where that clip's content sits relative to 128 — which nothing was checking.
+
+```
+                     mean Y    clipped to white    crushed to black
+N90 night clip        139.6          1.7%                3.5%
+MVI_0081 graded       214.1         51.8%                0.02%
+MVI_0081 ungraded     208.1          1.8%                0.00%
+```
+
+**51.8% is not a look, it is deletion.** The tarmac sits at 230-245; the transfer function
+maps everything above ~236 to 255, so every difference within that band becomes the same
+white. It was spotted by eye first — "it looks like the car is on a white plane" — and the
+measurement only confirmed what the eye had already found.
+
+The N90 clip has the same bug at the other rail. Its 3.5% crushed black was visible during
+development and read as acceptable because the subject was a white car against dark tarmac.
+It is the same defect, quieter.
+
+### Turning the constant down does not work
+
+The obvious fix is a gentler contrast. Measured on MVI_0081:
+
+```
+contrast=1.20   51.8% clipped
+contrast=1.06   39.4% clipped
+```
+
+A 6% expansion still destroys a third of the frame, because at mean 208 the content is
+already within ~20 units of the ceiling. **There is no safe value of `eq=contrast` for this
+footage** — the pivot is wrong, not the gain. That is what sent the fix to `curves`.
+
+### What replaced it
+
+`pipeline/grade.py` measures the clip and picks among three fixed presets, and `finish.sh`
+then verifies the result. `GRADE` still overrides, and an explicit `GRADE` is verified too.
+
+The verification is the load-bearing part: it compares clipped and crushed fractions
+against the *ungraded* render of the same clip and fails if grading made either materially
+worse. A blown source is the camera's doing and is allowed; a grade that adds clipping is
+not. That check rejects the old grade outright, which is the property worth having.
+
+### The automatic curve that was tried and abandoned
+
+The first three attempts synthesised a curve per clip from its own percentiles rather than
+selecting a preset. Each was tuned to land closer to a curve already approved by eye, and
+each stayed measurably worse than it:
+
+```
+                            tarmac stdev (local contrast, higher = more detail)
+ungraded                              39.22
+synthesised, linear ramp              32.95
+synthesised, squared ramp             32.95
+synthesised, two-anchor p50/p99       36.78
+hand-tuned, approved by eye           39.03
+old grade                             44.43   <- but 51.8% clipped, so this is
+                                                 the variance of a half-white frame
+```
+
+Three iterations of an automatic thing chasing a target only an eye can call is the shape
+of the six failed perceptual metrics above. So the curves are fixed and eye-checked, only
+the *choice* between them is automatic, and only clipping — which has an objective
+definition — is asserted anywhere.
+
+Note the last row: the old grade scores *highest* on local contrast. Any metric rewarding
+contrast would have preferred it. That is the same trap as the speckle metric that
+correlated with sharpness at r = 0.88.

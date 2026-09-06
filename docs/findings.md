@@ -387,22 +387,32 @@ risk for the ones that are.
 
 ## A pod is not necessarily yours alone
 
-The runner terminates its pod from an EXIT trap, which is right when the pod exists only
-for that job. It nearly destroyed someone else's work: a second workload was started on the
+`cloud/run_on_pod.sh` does not create or destroy pods — it runs *on* one and tells you to
+terminate it yourself. Everything below concerns the orchestration around it, which for
+these runs was a throwaway local script, not part of this repository.
+
+That script terminated its pod from an `EXIT` trap, bounding the pod's life by the work
+rather than by a timer. That was the right fix for the failure before it: an earlier run
+armed only a *watchdog*, which knew the clock and nothing else, so a render that finished
+in about an hour sat idle until a two-hour timer killed it — $1.01 for a completed render
+that was never downloaded.
+
+But the trap nearly caused a worse loss. A second, unrelated workload was started on the
 same pod, and the trap would have torn it down the moment the first render's download
-finished.
+finished. The trap catches `INT` and `TERM`, so killing the orchestrator would have
+triggered exactly what needed preventing; `SIGKILL` was the only way to stop it firing.
 
-Killing the runner would not have helped — the trap catches INT and TERM. `SIGKILL` was the
-only way to stop it firing.
+Three finished renders belonging to that other job were still sitting undownloaded when
+teardown was requested. Terminating would have destroyed them.
 
-Before any automatic teardown, check what is actually running:
+**Before any teardown, automatic or manual, check what is actually there:**
 
 ```bash
 nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv
 pgrep -af inference_cli
-ls -lh /workspace/cloud/*.mp4       # and whether every output has been retrieved
+ls -lh /workspace/cloud/*.mp4        # is every output actually downloaded?
 ```
 
-Three finished renders belonging to another job were sitting undownloaded when teardown was
-requested. Terminating would have destroyed them.
-
+The general lesson is not about traps. Automatic cleanup has to establish that it owns the
+thing it is cleaning up, and a rented pod is shared infrastructure the moment anyone else
+touches it.

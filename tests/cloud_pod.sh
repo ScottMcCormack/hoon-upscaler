@@ -25,8 +25,9 @@ cat > "$STUB/nvidia-smi" <<'EOF'
 #!/bin/bash
 # STUB_VRAM controls the reported total; STUB_GPU the name.
 case "$*" in
-  *nounits*) echo "${STUB_VRAM:-49140}" ;;
-  *)         echo "${STUB_GPU:-NVIDIA A40}, ${STUB_VRAM:-49140} MiB" ;;
+  *nounits*)                    echo "${STUB_VRAM:-49140}" ;;
+  *--query-gpu=name\ *|*--query-gpu=name) echo "${STUB_GPU:-NVIDIA A40}" ;;
+  *)                            echo "${STUB_GPU:-NVIDIA A40}, ${STUB_VRAM:-49140} MiB" ;;
 esac
 EOF
 
@@ -36,6 +37,8 @@ cat > "$STUB/python" <<'EOF'
 if [ "${1:-}" = "-c" ]; then
   case "$2" in
     *sys.exit*cuda.is_available*) exit "${STUB_NO_CUDA:-0}" ;;
+    *print\(torch.__version__\)*) echo "2.4.0"; exit 0 ;;           # the manifest reads this
+    *EXTERNALLY-MANAGED*)         exit 1 ;;                        # not a PEP 668 env
     *)                            echo "  torch 2.4.0  cuda=True  ${STUB_GPU:-NVIDIA A40}"; exit 0 ;;
   esac
 fi
@@ -53,9 +56,19 @@ fi
 exec /usr/bin/env python3 "$@"
 EOF
 
-for noop in pip apt-get git; do
+for noop in pip apt-get; do
   printf '#!/bin/bash\nexit 0\n' > "$STUB/$noop"
 done
+# git must answer rev-parse with something commit-shaped. A blanket `exit 0` returns an
+# empty string AND exits 0, so the script's `|| echo unknown` fallback never fires and
+# the manifest silently records seedvr2_commit="" — which the test then accepted.
+cat > "$STUB/git" <<'EOF'
+#!/bin/bash
+case "$*" in
+  *rev-parse*) echo "4490bd1f482e026674543386bb2a4d176da245b9" ;;
+  *)           exit 0 ;;
+esac
+EOF
 chmod +x "$STUB"/*
 
 # --- fixtures ---------------------------------------------------------------
@@ -125,6 +138,29 @@ case "$out" in
        "$(printf '%s' "$out" | grep -o '\-\-batch_size [0-9]*' | tail -1)" ;;
 esac
 
+# Values spliced into the inference command line must be plain integers. "17 --debug_leak"
+# would otherwise smuggle in a flag AND be recorded in the manifest as legitimate.
+for badval in abc -5 "17 --debug_leak" ""; do
+  label="${badval:-empty}"
+  clean
+  out="$(env PATH="$STUB:$PATH" WORKSPACE="$WS" BATCH_SIZE="$badval" \
+    bash "$CLOUD/run_on_pod.sh" 720 test 2>&1)"; st=$?
+  if [ -z "$badval" ]; then
+    # empty means "not set" — must run normally, not be refused
+    case "$out" in *"frame check OK"*) ok "override: an empty BATCH_SIZE is ignored, not refused" ;;
+      *) bad "override: an empty BATCH_SIZE is ignored, not refused" "exit $st" ;; esac
+  elif [ "$st" -ne 0 ] && [[ "$out" == *"must be a positive integer"* ]]; then
+    ok "override: BATCH_SIZE='$label' is refused"
+  else
+    bad "override: BATCH_SIZE='$label' is refused" "exit $st: $(printf '%s' "$out" | tail -1)"
+  fi
+done
+
+# RES reaches `[ "$RES" -ge 720 ]`, which errors inside an `if` on a non-integer and so
+# escapes set -e — the same trap the VRAM guard exists to close.
+clean; assert_stderr_matches "guard: a non-integer resolution is refused" "resolution must be a positive integer" \
+  env PATH="$STUB:$PATH" WORKSPACE="$WS" bash "$CLOUD/run_on_pod.sh" 1080p test
+
 # --- guards -----------------------------------------------------------------
 clean; assert_stderr_matches "guard: non-integer VRAM is refused" "could not read VRAM" \
   env PATH="$STUB:$PATH" WORKSPACE="$WS" STUB_VRAM="[N/A]" bash "$CLOUD/run_on_pod.sh" 720 test
@@ -172,13 +208,23 @@ except Exception as e:
     print(f"unreadable: {e}"); raise SystemExit
 need = ["resolution", "model", "extra_args", "fixed_args", "gpu", "torch",
         "seedvr2_commit", "input", "output"]
-missing = [k for k in need if k not in m]
+bad = [k for k in need if k not in m]
 for side in ("input", "output"):
-    if not m.get(side, {}).get("sha256"):
-        missing.append(f"{side}.sha256")
-    if not m.get(side, {}).get("frames"):
-        missing.append(f"{side}.frames")
-print("ok" if not missing else "missing: " + ", ".join(missing))
+    for f in ("sha256", "frames"):
+        if not m.get(side, {}).get(f):
+            bad.append(f"{side}.{f}")
+# Key presence is not enough: an empty or polluted value passed this before. These are
+# the fields that make a render reproducible, so check they look like themselves.
+import re
+if not re.fullmatch(r"[0-9a-f]{40}", str(m.get("seedvr2_commit", ""))):
+    bad.append(f"seedvr2_commit not a sha ({m.get('seedvr2_commit')!r})")
+if not re.fullmatch(r"[0-9][\w.+]*", str(m.get("torch", ""))):
+    bad.append(f"torch not a version ({m.get('torch')!r})")
+if "," in str(m.get("gpu", {}).get("name", "")):
+    bad.append(f"gpu.name polluted ({m['gpu']['name']!r})")
+if not isinstance(m.get("resolution"), int):
+    bad.append("resolution not an int")
+print("ok" if not bad else "bad: " + "; ".join(bad))
 PY
 )"
   if [ "$VERDICT" = "ok" ]; then

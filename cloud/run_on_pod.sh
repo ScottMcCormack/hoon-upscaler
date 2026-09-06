@@ -20,6 +20,10 @@
 # ============================================================================
 set -euo pipefail
 RES="${1:-720}"
+# Same reasoning as the VRAM guard below: a non-integer here makes `[ "$RES" -ge 720 ]`
+# error inside an `if`, which set -e does not catch, so the low-VRAM OOM warning would
+# silently never fire. It would then die much later in the manifest, after inference.
+[[ "$RES" =~ ^[0-9]+$ ]] || { echo "!! resolution must be a positive integer, got: '$RES'"; exit 1; }
 MODE="${2:-full}"
 case "$MODE" in
   test|full) ;;
@@ -117,8 +121,23 @@ if [ -n "${BATCH_SIZE:-}" ] || [ -n "${TEMPORAL_OVERLAP:-}" ]; then
   # Fall back to what the VRAM branch just chose, NOT to the 48GB defaults. Otherwise
   # setting one override silently rewrites the other: TEMPORAL_OVERLAP=5 on a 24GB card
   # would move batch 17 to 33, quietly changing the render the caller did not ask about.
-  CUR_B="$(printf '%s' "$EXTRA" | grep -oE -- '--batch_size [0-9]+' | grep -oE '[0-9]+')"
-  CUR_T="$(printf '%s' "$EXTRA" | grep -oE -- '--temporal_overlap [0-9]+' | grep -oE '[0-9]+')"
+  # Refuse anything that is not a plain positive integer. These values are spliced into
+  # the inference command line, so "17 --debug_leak" would smuggle in an extra flag and
+  # the manifest would record it as though it were legitimate. The same standard MODE is
+  # held to a few lines up, and for the same reason: this override exists to reproduce a
+  # paid render, so a wrong value costs a pod.
+  for v in BATCH_SIZE TEMPORAL_OVERLAP; do
+    val="${!v:-}"
+    [ -z "$val" ] && continue
+    [[ "$val" =~ ^[0-9]+$ ]] && [ "$val" -gt 0 ] || {
+      echo "!! $v must be a positive integer, got: '$val'"; exit 1; }
+  done
+  # grep exits 1 when it matches nothing, and under pipefail+set -e that kills the script
+  # with no output at all. No current branch omits either flag, but a future one might.
+  CUR_B="$(printf '%s' "$EXTRA" | grep -oE -- '--batch_size [0-9]+' | grep -oE '[0-9]+' || true)"
+  CUR_T="$(printf '%s' "$EXTRA" | grep -oE -- '--temporal_overlap [0-9]+' | grep -oE '[0-9]+' || true)"
+  [ -n "${BATCH_SIZE:-}" ] || [ -n "$CUR_B" ] || { echo "!! no --batch_size in EXTRA to override"; exit 1; }
+  [ -n "${TEMPORAL_OVERLAP:-}" ] || [ -n "$CUR_T" ] || { echo "!! no --temporal_overlap in EXTRA to override"; exit 1; }
   B="${BATCH_SIZE:-$CUR_B}"; T="${TEMPORAL_OVERLAP:-$CUR_T}"
   EXTRA="$(echo "$EXTRA" | sed -E "s/--batch_size [0-9]+/--batch_size $B/; s/--temporal_overlap [0-9]+/--temporal_overlap $T/")"
   echo "### OVERRIDE: batch $B, overlap $T (reproducing a recorded render) ###"

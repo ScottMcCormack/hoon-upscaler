@@ -250,7 +250,11 @@ fi
 # ---------------------------------------------------------------------------
 if want cloud; then
   echo
-  CLOUD_OUT="$(bash "$REPO/tests/cloud_pod.sh" 2>&1)"; CLOUD_STATUS=$?
+  # Bounded, because nothing else here is. The suite is meant to finish in seconds with
+  # no network and no GPU; if a stub is ever missed and a real command goes looking for
+  # one, the symptom should be a named timeout rather than a terminal that never returns.
+  # 137 is the exit status a timeout kill produces, and is reported as such below.
+  CLOUD_OUT="$(timeout --signal=KILL 300 bash "$REPO/tests/cloud_pod.sh" 2>&1)"; CLOUD_STATUS=$?
   printf '%s\n' "$CLOUD_OUT" | sed -n '2,$p' | grep -E 'PASS|FAIL|^$' || true
   # Fold its tally into ours. Strip ANSI first: the colour codes put a word character
   # immediately before PASS, so a \b anchor never matches.
@@ -262,7 +266,11 @@ if want cloud; then
   # its FAIL lines would let a nonzero exit pass as success. Charge one failure for the
   # exit status itself when it did not account for one.
   if [ "$CLOUD_STATUS" -ne 0 ]; then
-    FAILED_NAMES+=("cloud pod runner (exit $CLOUD_STATUS) — see bash tests/cloud_pod.sh")
+    if [ "$CLOUD_STATUS" -eq 137 ]; then
+      FAILED_NAMES+=("cloud pod runner: killed at the 300s timeout — it should take seconds, so suspect a missing stub letting a real command block")
+    else
+      FAILED_NAMES+=("cloud pod runner (exit $CLOUD_STATUS) — see bash tests/cloud_pod.sh")
+    fi
     [ "$CF" -eq 0 ] && FAIL=$((FAIL + 1))
   fi
 fi

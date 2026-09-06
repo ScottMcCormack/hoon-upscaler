@@ -98,7 +98,9 @@ echo
 # --- VRAM branch selection --------------------------------------------------
 # Picking the wrong branch is not an error, it is a slow expensive success: the
 # offload path was 19x slower on a card that never needed it.
-for case in "49140:batch 33:A40 48GB" "24564:batch 17:RTX 3090 24GB" "16376:fp8 with offloading:RTX 4080 16GB"; do
+# Card names are the ones actually measured at these VRAM figures (docs/findings.md),
+# so a reader chasing a branch can find the run that justified it.
+for case in "49140:batch 33:A40 48GB" "24564:batch 17:RTX 4090 24GB" "16376:fp8 with offloading:RTX A4000 16GB"; do
   vram="${case%%:*}"; rest="${case#*:}"; want="${rest%%:*}"; label="${rest#*:}"
   out="$(STUB_VRAM="$vram" run_pod bash "$CLOUD/run_on_pod.sh" 720 test)"
   case "$out" in
@@ -220,6 +222,45 @@ clean; assert_stderr_matches "guard: inference producing no file is refused" "no
 clean; assert_stderr_matches "guard: a short render is refused" "frame count mismatch" \
   env PATH="$STUB:$PATH" WORKSPACE="$WS" STUB_OUT_FRAMES=200 bash "$CLOUD/run_on_pod.sh" 720 test
 
+# --- defaults ---------------------------------------------------------------
+# Every other case passes both positional arguments, so the values used when they are
+# OMITTED were never executed by a test. Flipping MODE's default between the free test
+# render and the chargeable full one passed the whole suite. The header documents
+# `run_on_pod.sh 720` as the full clip, which makes the default an interface worth
+# pinning rather than an accident.
+clean
+# 214 frames, matching what the stub inference emits: this case is about which
+# resolution and mode get chosen, and a frame-count mismatch would mask that.
+ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=s=64x36:r=15:d=20" \
+  -frames:v 214 -c:v libx264 -crf 30 -pix_fmt yuv420p "$CLOUD/full_169.mp4"
+
+out="$(run_pod bash "$CLOUD/run_on_pod.sh")"; status=$?
+DEF="$CLOUD/sr_out_720.json"   # full mode renders to sr_out_<res>, as the masters are named
+if [ "$status" -ne 0 ]; then
+  bad "defaults: no arguments means 720 and full" "exit $status: $(printf '%s' "$out" | tail -1)"
+elif [ ! -f "$DEF" ]; then
+  bad "defaults: no arguments means 720 and full" "expected manifest $DEF, got: $(ls "$CLOUD"/sr_*.json 2>/dev/null | tr '\n' ' ')"
+else
+  V="$(python - "$DEF" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1]))
+b = []
+if m.get("resolution") != 720: b.append(f"resolution {m.get('resolution')!r}, want 720")
+if m.get("mode") != "full":    b.append(f"mode {m.get('mode')!r}, want 'full'")
+if m.get("input", {}).get("file") != "full_169.mp4":
+    b.append(f"input {m.get('input', {}).get('file')!r}, want 'full_169.mp4'")
+print("ok" if not b else "bad: " + "; ".join(b))
+PY
+)"
+  [ "$V" = "ok" ] && ok "defaults: no arguments means 720 and full" \
+                  || bad "defaults: no arguments means 720 and full" "$V"
+fi
+
+# The mode default alone, without depending on the render succeeding.
+clean; rm -f "$CLOUD/full_169.mp4"
+assert_stderr_matches "defaults: with no mode it looks for the full clip, not the test one" \
+  "full_169.mp4" env PATH="$STUB:$PATH" WORKSPACE="$WS" bash "$CLOUD/run_on_pod.sh" 720
+
 # --- the happy path ---------------------------------------------------------
 out="$(run_pod bash "$CLOUD/run_on_pod.sh" 720 test)"; status=$?
 if [ "$status" -eq 0 ]; then ok "happy path: exits 0"
@@ -236,7 +277,10 @@ if [ ! -f "$MAN" ]; then
 else
   ok "manifest: written beside the render"
   # Assert, do not merely print. An empty object used to pass this.
-  VERDICT="$(python - "$MAN" <<'PY'
+  # Expected values come from the invocation itself (720, test, VRAM 49140 -> batch 33),
+  # not from the manifest. Reading the manifest to decide what the manifest should say
+  # is the mismatched-baseline trap in miniature.
+  VERDICT="$(python - "$MAN" 720 test 33 5 seedvr2_ema_3b_fp16.safetensors <<'PY'
 import json, sys
 try:
     m = json.load(open(sys.argv[1]))
@@ -260,6 +304,30 @@ if "," in str(m.get("gpu", {}).get("name", "")):
     bad.append(f"gpu.name polluted ({m['gpu']['name']!r})")
 if not isinstance(m.get("resolution"), int):
     bad.append("resolution not an int")
+
+# Shape checks are not content checks. A manifest hardcoded to "resolution": 999 with the
+# wrong model passed everything above: every field was present, an int, and well-formed.
+# The manifest exists so two renders can be told apart, so it has to be checked against
+# what was actually run.
+want_res, want_mode, want_b, want_t, want_model = sys.argv[2:7]
+if m.get("resolution") != int(want_res):
+    bad.append(f"resolution {m.get('resolution')!r}, invoked with {want_res}")
+if m.get("mode") != want_mode:
+    bad.append(f"mode {m.get('mode')!r}, invoked with {want_mode!r}")
+if m.get("model") != want_model:
+    bad.append(f"model {m.get('model')!r}, expected {want_model!r}")
+ex = m.get("extra_args", [])
+for flag, want in (("--batch_size", want_b), ("--temporal_overlap", want_t)):
+    if flag not in ex or ex[ex.index(flag) + 1] != want:
+        bad.append(f"{flag} not {want} in extra_args {ex!r}")
+
+# sha256 was checked for truthiness only, three lines from a field checked against
+# ^[0-9a-f]{40}$. A placeholder string satisfied a test whose name promises checksums.
+for side in ("input", "output"):
+    h = str(m.get(side, {}).get("sha256", ""))
+    if not re.fullmatch(r"[0-9a-f]{64}", h):
+        bad.append(f"{side}.sha256 not a sha256 ({h!r})")
+
 print("ok" if not bad else "bad: " + "; ".join(bad))
 PY
 )"

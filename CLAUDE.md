@@ -80,8 +80,10 @@ computed where the effect should not appear — catches most of it.
 - **RTX 5060 Ti is Blackwell, sm_120.** Stock PyTorch builds (cu124/126/128) have no
   kernels for it — install with `--index-url .../whl/cu130`. Cloud Ampere/Ada cards (A40,
   A100, L40S) take stock builds; another Blackwell (RTX 5090) repeats the trap.
-- **16GB VRAM is a cliff, not a curve.** Below it ~1.3s/frame, above ~25s/frame — 19×
-  from a 25% resolution increase. An A40 48GB removes it — $0.49/hr as of Sept 2026, and
+- **16GB VRAM is a cliff, not a curve.** On the local RTX 5060 Ti: below it ~1.3s/frame,
+  above ~25s/frame — 19× from a 25% resolution increase, still completing. A 16GB *A4000*
+  instead OOMs outright at 720 (`docs/findings.md`); same capacity, different failure. Do
+  not treat one as evidence for the other. An A40 48GB removes it — $0.49/hr as of Sept 2026, and
   a measured $0.34 for the whole clip at 720 including setup.
 - **15GB system RAM.** Long clips held entirely in memory trigger the OOM killer. Use
   chunked/streaming modes; check `dmesg | grep -i oom-kill` when a process dies silently.

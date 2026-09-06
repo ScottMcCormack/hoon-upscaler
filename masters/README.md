@@ -36,7 +36,7 @@ BATCH_SIZE=65 TEMPORAL_OVERLAP=5 bash run_on_pod.sh 720 full
 
 SeedVR2 is deterministic given identical parameters. Verified twice: byte-identical
 across two runs on one pod, and — more tellingly — the 1080p master in this directory was
-reproduced months later from its recorded parameters, sha256 for sha256. A manifest plus
+reproduced seven days later from its recorded parameters, sha256 for sha256. A manifest plus
 these overrides recreates a master exactly.
 
 Any master added from here should arrive with its manifest. For the two above, what is

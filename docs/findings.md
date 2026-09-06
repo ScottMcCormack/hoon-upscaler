@@ -250,7 +250,8 @@ so it compared a frame with itself.
 
 ## The cloud runner, first executed 2026-09-04
 
-`cloud/run_on_pod.sh` existed for months without ever being run. `tests/cloud_pod.sh` now
+`cloud/run_on_pod.sh` was committed on 2026-08-31 and first run on 2026-09-04 - four days
+unexecuted, not the "months" an earlier draft of this line claimed. `tests/cloud_pod.sh` now
 drives it against stubs and catches most of what can go wrong, but the first real pod run
 found something no stub could.
 
@@ -294,7 +295,8 @@ makes the manifest the load-bearing artifact rather than the master file itself.
 makes `BATCH_SIZE`/`TEMPORAL_OVERLAP` overrides worth having, since the VRAM branch picks
 settings for a fresh render and cannot select the batch 65 the 720p master was built with.
 
-**Confirmed against a real master.** The 1080p master, rendered months earlier, was
+**Confirmed against a real master.** The 1080p master, rendered 2026-08-29 and
+reproduced 2026-09-05 - seven days, not months - was
 reproduced from its recorded parameters:
 
 ```
@@ -330,8 +332,19 @@ at this clip size. Worth knowing before paying for a bigger card on speed ground
 **The low-VRAM branch is not broken, but 720 is out of reach for 16GB.** It dies with
 `torch.OutOfMemoryError` inside `attn_video_vae.py`, in the VAE rather than the DiT — so
 `--blocks_to_swap 16` and the CPU offload flags, which act on the DiT, cannot save it. The
-same card completed 540 comfortably. That is the cliff CLAUDE.md describes, located
-precisely: between 540 and 720 output on 16GB.
+same card completed 540 comfortably, at 1.01 fps.
+
+**This is probably not the cliff CLAUDE.md describes, and the difference matters.** That
+entry records ~1.3s/frame below the limit against ~25s/frame above it — a 19x slowdown
+that still *finishes*, on the local RTX 5060 Ti. What the A4000 does at 720 is die with
+zero frames. A run that completes 19x slow and a run that produces nothing are different
+failure modes, and the two cards are different architectures with the same 16GB. No
+throughput number exists for a completing-but-slow 720 on 16GB, so nothing here locates
+the 5060 Ti's cliff; what it locates is the A4000's OOM boundary, between 540 and 720.
+
+Recorded as two adjacent limits rather than one, because collapsing them would be the same
+mistake this file already documents four times: a sound measurement compared against
+something that differs by more than the variable under test.
 
 The script now warns before that combination rather than letting someone discover it after
 paying for setup. A warning, not a refusal: the branch covers 16-22GB and the exact limit
@@ -451,3 +464,47 @@ right check, but it was run against the shared working tree while a second revie
 was executing the same suite, which killed its run mid-flight and made its results
 unusable. Mutation testing mutates shared state. Do it in a worktree or a copy when
 anything else is reading the tree.
+
+## The tests that guarded the manifest could not read it, 2026-09-06
+
+A second adversarial review, of the tests and the docs rather than the shell, found that
+the manifest test validated everything except the manifest.
+
+`manifest: carries the full invocation and both checksums` checked that nine keys existed,
+that `seedvr2_commit` matched `^[0-9a-f]{40}$`, that `torch` looked like a version, that
+`gpu.name` was unpolluted, and that `resolution` was an `int`. Every one of those is a
+check on *shape*. None compared a recorded value against what was actually invoked.
+
+Demonstrated by mutation: hardcoding `"resolution": 999` and
+`"model": "WRONG_MODEL.safetensors"` into the writer passed all 59 tests. So did replacing
+`sha256()` with a function returning the literal string `not-a-real-hash` — in a test whose
+name promises "both checksums", three lines from a field checked against a 40-hex regex.
+
+The manifest exists so two renders can be told apart. A test that cannot distinguish a
+truthful manifest from a fabricated one guards nothing, and it would have passed happily
+through exactly the confusion the manifests were introduced to end: the 720p master's
+batch 65 recorded nowhere, and a batch-33 render compared against it to "disprove"
+determinism.
+
+The test now takes the expected values as arguments — `720 test 33 5 <model>` — supplied
+from the invocation rather than read back out of the file under test. Reading the artifact
+to decide what the artifact should say is the mismatched-baseline error at its smallest.
+
+**A second gap, from the same cause.** Every one of the 29 cloud cases passed both
+positional arguments explicitly. The values used when they are *omitted* had never been
+executed. Flipping `MODE="${2:-full}"` to `${2:-test}` — silently swapping the chargeable
+render for the free one, or the reverse — passed the entire suite, in the same commit that
+had just added a guard because "the wrong guess is the chargeable full render". The guard
+went on the adjacent case and missed the fundamental one.
+
+The rule that catches both: a test asserts against something *outside* the thing it tests,
+and the arguments a script is normally called with are not its defaults.
+
+**Three false "months" claims.** This file said the cloud runner "existed for months
+without ever being run" under a heading reading "first executed 2026-09-04"; it was
+committed on 2026-08-31, four days earlier. It said the 1080p master was reproduced
+"months later" when the interval was seven days. `masters/README.md` repeated it. The
+repository's first commit is 2026-08-29 — nothing in it can be months old. An invented
+interval, in the document that catalogues other unverified claims, added because it made
+the finding sound weightier. Dates are cheap to check: `git log --diff-filter=A` settles
+every one of them.

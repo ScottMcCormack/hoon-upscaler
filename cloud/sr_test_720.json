@@ -1,0 +1,42 @@
+{
+  "created_utc": "2026-09-07T12:56:10+00:00",
+  "mode": "test",
+  "resolution": 720,
+  "model": "seedvr2_ema_3b_fp16.safetensors",
+  "extra_args": [
+    "--batch_size",
+    "33",
+    "--temporal_overlap",
+    "5"
+  ],
+  "fixed_args": [
+    "--chunk_size",
+    "370",
+    "--cache_dit",
+    "--cache_vae",
+    "--color_correction",
+    "wavelet",
+    "--video_backend",
+    "ffmpeg"
+  ],
+  "gpu": {
+    "name": "NVIDIA A40",
+    "vram_mb": 46068
+  },
+  "torch": "2.8.0.dev20250319+cu128",
+  "seedvr2_commit": "4490bd1f482e026674543386bb2a4d176da245b9",
+  "input": {
+    "file": "test_15s.mp4",
+    "frames": 214,
+    "width": 312,
+    "height": 176,
+    "sha256": "6b74ee19e202216a6f7ecf1ef753a25c759cd190bc151615050fa662b99dbc3f"
+  },
+  "output": {
+    "file": "sr_test_720.mp4",
+    "frames": 214,
+    "width": 1276,
+    "height": 720,
+    "sha256": "3f0d0cf8fd21c786e68349869f148c93ff288040b05ad2c48ab0c567e20ba09d"
+  }
+}

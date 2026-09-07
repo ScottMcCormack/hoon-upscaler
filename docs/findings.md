@@ -686,3 +686,43 @@ definition — is asserted anywhere.
 Note the last row: the old grade scores *highest* on local contrast. Any metric rewarding
 contrast would have preferred it. That is the same trap as the speckle metric that
 correlated with sharpness at r = 0.88.
+
+## Copilot on the grade: two real defects and one half-right, 2026-09-07
+
+**A sampled guard cannot assert what it does not look at.** `verify` compared ungraded
+against graded using every 20th frame, so damage confined to a shorter run passed unseen.
+Demonstrated: a 40-frame clip with frames 1-9 blown to white measures **0.00% clipped at a
+stride of 20 and 22.50% scanning every frame** - the sampled check called a clip a fifth
+destroyed "verified".
+
+Sampling is now a speed knob for *choosing* a preset only. The guard scans every frame,
+which it can afford because the statistics come from a streamed 256-bin histogram rather
+than a buffered array: constant memory regardless of clip length. Buffering every frame of
+a 1480-frame 1080p render would be ~3GB on a machine whose notes already record the OOM
+killer taking processes out. uint8 has 256 possible values, so mean and percentiles from
+the histogram are exact, not approximations.
+
+**A test that proved only that a message was printed.** `GRADE="eq=saturation=1.0"` is an
+identity filter, and the assertion matched a line emitted *before* ffmpeg ran. Mutation-
+proved: making `finish.sh` announce "grade: explicit" and then silently discard the
+override left the test passing. It now uses `saturation=0`, requires exit 0, and reads
+`signalstats.SATAVG` back out of the render - measuring the effect rather than the
+announcement.
+
+**Copilot was half right here, and the half it got wrong matters.** It claimed the same
+flaw applied to the adjacent `contrast=4.0` case. It does not: that filter is not an
+identity, and the same mutation *fails* it, because the assertion depends on the grade
+having been applied and then measured. Reviewing the claim by mutation rather than by
+agreement is what separated the two.
+
+**An unreviewed preset was auto-selectable.** The `dark` curve carried a comment saying it
+had not been checked by eye, in a module whose docstring says every curve was. The
+measurement could select it, and an unapproved look would be baked into a master silently.
+It is now in `UNREVIEWED`: `pick` still reports it as the measurement's honest answer, but
+the CLI falls back to `neutral` and says so on stderr unless `GRADE_ALLOW_UNREVIEWED=1`.
+Neutral is safe rather than good - it shapes the middle and leaves the rails alone.
+
+No footage in the project currently reaches it: `full_169.mp4` and `test_15s.mp4` measure
+neutral, `mvi0081_full.mp4` measures bright. So this closed a latent trap rather than a
+live one - worth saying, because "we would have noticed" was the reasoning that let the
+fixed grade clip 51.8% of a daylight clip in the first place.

@@ -386,8 +386,11 @@ if want grade; then
 
   assert_eq "grade: a clip pinned to white picks the bright preset" \
     "bright" "$(python "$G" pick "$W/bright.mp4" --name 2>/dev/null)"
-  assert_eq "grade: a clip pinned to black picks the dark preset" \
-    "dark" "$(python "$G" pick "$W/dark.mp4" --name 2>/dev/null)"
+  # The opt-in is needed because 'dark' is unreviewed and no longer auto-selected. What
+  # is asserted here is the MEASUREMENT - black footage measures as needing the dark
+  # curve - which stays true and testable independently of whether it is approved to run.
+  assert_eq "grade: a clip pinned to black measures as needing the dark preset" \
+    "dark" "$(GRADE_ALLOW_UNREVIEWED=1 python "$G" pick "$W/dark.mp4" --name 2>/dev/null)"
   assert_eq "grade: a clip on neither rail picks neutral" \
     "neutral" "$(python "$G" pick "$W/mid.mp4" --name 2>/dev/null)"
 
@@ -410,11 +413,52 @@ if want grade; then
   # Capture, then match. Piping into `grep -q` looks equivalent and is not: grep exits
   # on the first match, finish.sh takes SIGPIPE, and `pipefail` reports the pipeline as
   # failed even though the assertion held.
-  out="$(GRADE="eq=saturation=1.0" bash "$REPO/pipeline/finish.sh" "$RAW" G "$SRC" "$GOUT" 2>&1)"
+  # saturation=0, not saturation=1.0. The identity filter this used to pass proved only
+  # that finish.sh PRINTED "grade: explicit" before ffmpeg ran - a mutation that announced
+  # the override and then silently discarded it passed the test. The effect has to be
+  # measurable in the render, and the run has to succeed.
+  out="$(GRADE="eq=saturation=0" bash "$REPO/pipeline/finish.sh" "$RAW" G "$SRC" "$GOUT" 2>&1)"; st=$?
+  GRADED="$GOUT/G_lumafix_14fps.mp4"
+  if [ "$st" -ne 0 ]; then
+    bad "grade: finish.sh honours an explicit GRADE" "exit $st: $(printf '%s' "$out" | tail -1)"
+  elif [ ! -f "$GRADED" ]; then
+    bad "grade: finish.sh honours an explicit GRADE" "no $GRADED"
+  else
+    # SATAVG collapses to ~1 when saturation is zeroed, and sits well above it otherwise.
+    SAT="$(ffprobe -v error -f lavfi "movie=$GRADED,signalstats" \
+            -show_entries frame_tags=lavfi.signalstats.SATAVG -of csv=p=0 2>/dev/null \
+            | head -1 | tr -d ',')"      # csv=p=0 still emits a trailing comma
+    if [ -n "$SAT" ] && python -c "import sys; sys.exit(0 if float('$SAT') < 5 else 1)" 2>/dev/null; then
+      ok "grade: finish.sh honours an explicit GRADE (SATAVG $SAT)"
+    else
+      bad "grade: finish.sh honours an explicit GRADE" "GRADE was announced but not applied (SATAVG ${SAT:-unreadable}, expected < 5)"
+    fi
+  fi
+
+  # An unreviewed preset must not be chosen for you. pick() still reports 'dark' as the
+  # measurement's answer - that is a fact about the footage - but the CLI that finish.sh
+  # calls refuses to hand back an unapproved look without an explicit opt-in.
+  DARKSRC="$W/gdark.mp4"
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "color=c=black:s=64x36:r=15:d=2" \
+    -frames:v 20 -c:v libx264 -crf 20 -pix_fmt yuv420p "$DARKSRC"
+  out="$(python "$G" pick "$DARKSRC" --name 2>&1)"
   case "$out" in
-    *"grade: explicit"*) ok "grade: finish.sh honours an explicit GRADE" ;;
-    *) bad "grade: finish.sh honours an explicit GRADE" "$(printf '%s' "$out" | tail -1)" ;;
+    *"not been checked by eye"*neutral) ok "grade: an unreviewed preset is not auto-selected" ;;
+    *) bad "grade: an unreviewed preset is not auto-selected" "got: $(printf '%s' "$out" | tr '\n' ' ')" ;;
   esac
+  out="$(GRADE_ALLOW_UNREVIEWED=1 python "$G" pick "$DARKSRC" --name 2>/dev/null)"
+  assert_eq "grade: an unreviewed preset can be opted into" "dark" "$out"
+
+  # A sampled guard steps over damage shorter than its stride. Frames 1-9 are blown to
+  # white while frames 0 and 20 - the only ones a stride of 20 looks at - stay grey, so
+  # the old check reported 0.00% clipped on a clip 22.5% destroyed and called it verified.
+  UNG="$W/gap_ungraded.mp4"; GRD="$W/gap_graded.mp4"
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "color=c=gray:s=64x36:r=15:d=3" -frames:v 40 \
+    -vf "geq=lum='128':cb='128':cr='128'" -c:v libx264 -qp 0 -pix_fmt yuv420p "$UNG"
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "color=c=gray:s=64x36:r=15:d=3" -frames:v 40 \
+    -vf "geq=lum='if(between(N,1,9),255,128)':cb='128':cr='128'" -c:v libx264 -qp 0 -pix_fmt yuv420p "$GRD"
+  assert_stderr_matches "grade: the guard sees damage between sampled frames" "destroying picture" \
+    python "$G" verify "$UNG" "$GRD"
 
   # ...and must still be checked. Setting GRADE is not a licence to destroy the picture.
   rm -rf "$GOUT"; mkdir -p "$GOUT"

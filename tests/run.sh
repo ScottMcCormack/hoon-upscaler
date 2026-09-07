@@ -435,6 +435,35 @@ if want grade; then
     fi
   fi
 
+  # The rail boundaries themselves. Both off-by-ones (254->255, 1->0) passed every other
+  # test in this group, because pick() and verify() only need gross classification and
+  # never care exactly where the rail starts.
+  RAILS="$(python - <<'PY'
+import sys
+sys.path.insert(0, "pipeline")
+import numpy as np, grade
+bad = []
+for lv, want_c, want_x in ((0,0,1), (1,0,1), (2,0,0), (253,0,0), (254,1,0), (255,1,0)):
+    c = np.zeros(256, dtype=np.int64); c[lv] = 1000
+    st = grade.summarise(c)
+    if round(st["clipped"]) != want_c: bad.append(f"luma {lv}: clipped {st['clipped']}")
+    if round(st["crushed"]) != want_x: bad.append(f"luma {lv}: crushed {st['crushed']}")
+print("ok" if not bad else "bad: " + "; ".join(bad))
+PY
+)"
+  assert_eq "grade: the rails are exactly 254-255 and 0-1" "ok" "$RAILS"
+
+  # A truncated render measures clean on whatever survived, and ffmpeg exits 0 after
+  # dropping what it could not decode. CLAUDE.md records this trap for inference output;
+  # the guard needs it too, or it reports "verified" on half a clip.
+  TRU="$W/gtrunc.mp4"
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "color=c=gray:s=64x36:r=15:d=4" -frames:v 60 \
+    -vf "geq=lum='if(gte(N,30),255,128)':cb=128:cr=128" -movflags +faststart \
+    -c:v libx264 -qp 0 -pix_fmt yuv420p "$TRU"
+  truncate -s -600 "$TRU"
+  assert_stderr_matches "grade: a truncated file is refused, not measured" "decoded" \
+    python "$G" measure "$TRU"
+
   # An unreviewed preset must not be chosen for you. pick() still reports 'dark' as the
   # measurement's answer - that is a fact about the footage - but the CLI that finish.sh
   # calls refuses to hand back an unapproved look without an explicit opt-in.

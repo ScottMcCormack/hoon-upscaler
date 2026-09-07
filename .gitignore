@@ -56,3 +56,6 @@ experiments/*
 
 # --- claude code: local overrides are per-machine ---
 .claude/settings.local.json
+
+# --- claude code: agent worktrees are transient ---
+.claude/worktrees/

@@ -73,7 +73,29 @@ def dims(path):
          "-show_entries", "stream=width,height", "-of", "csv=p=0", path],
         capture_output=True, text=True, check=True).stdout.strip()
     w, _, h = out.partition(",")
-    return int(w), int(h)
+    if not (w.isdigit() and h.strip().rstrip(",").isdigit()):
+        raise SystemExit(
+            f"!! {path}: could not read dimensions (ffprobe said {out!r}). "
+            f"The file is missing, unreadable, or not a video.")
+    return int(w), int(h.strip().rstrip(","))
+
+
+def frame_count(path):
+    """Frames the container DECLARES, for cross-checking what we actually decoded.
+
+    nb_frames comes from the header and survives truncation; counting packets does not -
+    a truncated file recounts to the number that happen to be left, which then agrees
+    with however many decoded and the check proves nothing. Measured on a file cut by
+    600 bytes: nb_frames 60, recounted packets 25. Same nb_frames-then-fallback shape
+    that cloud/run_on_pod.sh uses on inference output.
+    """
+    def probe(args, key):
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", *args,
+             "-show_entries", f"stream={key}", "-of", "csv=p=0", path],
+            capture_output=True, text=True).stdout.strip().rstrip(",")
+        return int(out) if out.isdigit() else 0
+    return probe([], "nb_frames") or probe(["-count_packets"], "nb_read_packets")
 
 
 def histogram(path, every=1):
@@ -82,7 +104,8 @@ def histogram(path, every=1):
     Returns (counts, frames). Memory is constant in clip length: frames are consumed as
     they arrive and only the bin counts are kept. That is what makes scanning EVERY frame
     affordable - buffering a 1480-frame 1080p render would be ~3GB, on a machine whose
-    docs already record the OOM killer taking processes out.
+    docs already record the OOM killer taking processes out. Measured: 622MB for 300
+    frames at 1080p, which extrapolates to 3.07GB for the real clip.
 
     `every=1` scans everything. Sampling is a speed knob for choosing a preset, never for
     the guard: a sampled check can step straight over a clipped shot shorter than its
@@ -90,52 +113,110 @@ def histogram(path, every=1):
     """
     import numpy as np
     w, h = dims(path)
-    vf = "format=gray" if every <= 1 else rf"select='not(mod(n\,{every}))',format=gray"
-    proc = subprocess.Popen(
-        ["ffmpeg", "-v", "error", "-i", path, "-an", "-vf", vf,
-         "-f", "rawvideo", "-pix_fmt", "gray", "-"],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    counts = np.zeros(256, dtype=np.int64)
-    frame_bytes, frames, buf = w * h, 0, b""
-    while True:
-        chunk = proc.stdout.read(frame_bytes * 8)
-        if not chunk:
-            break
-        buf += chunk
-        n = len(buf) // frame_bytes
-        if n:
-            whole, buf = buf[:n * frame_bytes], buf[n * frame_bytes:]
-            counts += np.bincount(np.frombuffer(whole, dtype=np.uint8), minlength=256)
-            frames += n
-    proc.stdout.close()
-    err = proc.stderr.read().decode(errors="replace")
-    proc.stderr.close()
-    if proc.wait() != 0:
+    expected = frame_count(path)
+    if every <= 1:
+        vf = "format=gray"
+        want = expected
+    else:
+        # -fps_mode passthrough matters: without it ffmpeg's default sync DUPLICATES the
+        # selected frames back up to a constant rate, so `every=20` decoded ~70% of the
+        # clip rather than 5% and the "speed knob" barely turned.
+        vf = rf"select='not(mod(n\,{every}))',format=gray"
+        want = (expected + every - 1) // every if expected else 0
+
+    cmd = ["ffmpeg", "-v", "error", "-i", path, "-an", "-vf", vf]
+    if every > 1:
+        cmd += ["-fps_mode", "passthrough"]
+    cmd += ["-f", "rawvideo", "-pix_fmt", "gray", "-"]
+
+    # stderr goes to a file, never a pipe. A pipe deadlocks: this loop blocks reading
+    # stdout, ffmpeg blocks writing a full stderr pipe nobody is draining, and neither
+    # side can move. Reproduced on a densely corrupted file - 128KB of decode errors,
+    # zero output frames, hung until killed.
+    import tempfile
+    with tempfile.TemporaryFile() as errf:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errf)
+        counts = np.zeros(256, dtype=np.int64)
+        frame_bytes, frames, buf = w * h, 0, b""
+        while True:
+            chunk = proc.stdout.read(frame_bytes)
+            if not chunk:
+                break
+            buf += chunk
+            n = len(buf) // frame_bytes
+            if n:
+                whole, buf = buf[:n * frame_bytes], buf[n * frame_bytes:]
+                counts += np.bincount(np.frombuffer(whole, dtype=np.uint8), minlength=256)
+                frames += n
+        proc.stdout.close()
+        rc = proc.wait()
+        errf.seek(0)
+        err = errf.read().decode(errors="replace")
+
+    if rc != 0:
         raise SystemExit(f"!! {path}: ffmpeg failed while measuring\n{err.strip()}")
     if frames == 0:
         raise SystemExit(f"!! {path}: decoded no frames to measure")
+
+    # ffmpeg exits 0 after dropping frames it could not decode, so a truncated file
+    # measures clean on whatever survived. CLAUDE.md already records this exact trap for
+    # inference output: a crashed run left a plausible short file that only its duration
+    # gave away. A guard that reports "verified" on half a clip is worse than no guard.
+    if want and frames != want:
+        raise SystemExit(
+            f"!! {path}: decoded {frames} frames but the file claims {want}. "
+            f"The file is truncated or failed to decode, and any measurement of it "
+            f"describes only the part that survived.\n{err.strip()}")
+    if buf:
+        raise SystemExit(f"!! {path}: trailing {len(buf)} bytes, not a whole frame")
     return counts, frames
 
 
-def _percentile(counts, total, pct):
-    """Exact percentile from the histogram - uint8 has only 256 possible values."""
+def _order_stat(cumsum, k):
+    """Value at sorted index k, read out of the cumulative histogram."""
     import numpy as np
-    target = pct / 100.0 * total
-    return float(np.searchsorted(np.cumsum(counts), target, side="left"))
+    return float(np.searchsorted(cumsum, k + 1, side="left"))
+
+
+def _percentile(counts, total, pct):
+    """Percentile matching numpy's default linear interpolation.
+
+    Snapping to a bin edge instead - the obvious thing to do with a histogram - is not
+    equivalent, and the difference reached 9 luma levels in testing. It matters because
+    pick() branches on `p99 >= 250` and `p01 <= 2`: a clip measured at p99 241.09 by
+    interpolation reads 250.00 when snapped, which silently changes the chosen preset.
+    """
+    import numpy as np
+    cumsum = np.cumsum(counts)
+    pos = pct / 100.0 * (total - 1)
+    lo = int(np.floor(pos))
+    hi = min(int(np.ceil(pos)), total - 1)
+    v_lo = _order_stat(cumsum, lo)
+    if hi == lo:
+        return v_lo
+    return v_lo + (pos - lo) * (_order_stat(cumsum, hi) - v_lo)
+
+
+def summarise(counts):
+    """Luma statistics from bin counts. Separate from stats() so the rail boundaries can
+    be tested exactly, without a video file and an encoder in the way: 254 and 255 count
+    as clipped, 0 and 1 as crushed, and an off-by-one either way went unnoticed by every
+    test in the suite before this was extracted.
+    """
+    total = int(counts.sum())
+    return {
+        "mean": float(sum(i * c for i, c in enumerate(counts)) / total),
+        "p01": _percentile(counts, total, 1),
+        "p50": _percentile(counts, total, 50),
+        "p99": _percentile(counts, total, 99),
+        "clipped": float(int(counts[254:].sum()) / total),
+        "crushed": float(int(counts[:2].sum()) / total),
+    }
 
 
 def stats(path, every=1):
     counts, _ = histogram(path, every)
-    total = int(counts.sum())
-    levels = range(256)
-    return {
-        "mean": float(sum(i * c for i, c in zip(levels, counts)) / total),
-        "p01": _percentile(counts, total, 1),
-        "p50": _percentile(counts, total, 50),
-        "p99": _percentile(counts, total, 99),
-        "clipped": float(counts[254:].sum() / total),
-        "crushed": float(counts[:2].sum() / total),
-    }
+    return summarise(counts)
 
 
 def pick(st):
@@ -195,8 +276,13 @@ def main():
                   f"   To approve it: look at a render and remove '{name}' from UNREVIEWED "
                   f"in grade.py.", file=sys.stderr)
             name = "neutral"
-        if len(sys.argv) > 3 and sys.argv[3] == "--name":
+        arg = sys.argv[3] if len(sys.argv) > 3 else ""
+        if arg == "--name":
             print(name)
+        elif arg == "--both":
+            # Name then filter, so a caller needing both pays for one measurement.
+            print(name)
+            print(PRESETS[name])
         else:
             print(PRESETS[name])
     elif cmd == "verify":

@@ -726,3 +726,71 @@ No footage in the project currently reaches it: `full_169.mp4` and `test_15s.mp4
 neutral, `mvi0081_full.mp4` measures bright. So this closed a latent trap rather than a
 live one - worth saying, because "we would have noticed" was the reasoning that let the
 fixed grade clip 51.8% of a daylight clip in the first place.
+
+## Two adversarial reviews of the grade change, 2026-09-07
+
+Correctness and simplicity, reviewed separately. Both earned their keep, and the most
+useful result was a rejected suggestion.
+
+**A truncated file measured clean and passed the guard.** ffmpeg exits **0** after dropping
+frames it cannot decode, so a file cut by 600 bytes decoded 25 of its 60 frames, reported
+`clipped 0.000%`, and passed `verify` — on a render that is 50% blown white. `CLAUDE.md`
+already records this exact trap for inference output; the grade guard had no equivalent.
+
+The fix needed a second correction. Comparing decoded frames against `-count_packets`
+catches nothing: a truncated file *recounts* to whatever survived, so the reference agreed
+with the damage. `nb_frames` comes from the header and survives truncation — 60 declared
+against 25 recounted. **A cross-check is only as good as its reference, which is this
+project's recurring error wearing another hat.**
+
+**A two-pipe deadlock.** `histogram` drained stdout in a blocking loop and read stderr only
+afterwards. On a densely corrupted file ffmpeg wrote 128KB of decode errors, filled the
+stderr pipe, and blocked; the loop waited for stdout that could never arrive. Reproduced,
+hung until killed. stderr now goes to a temp file, never a pipe.
+
+**Snapping a percentile to a bin edge is not the same as interpolating one.** `np.percentile`
+interpolates between order statistics; `searchsorted` on a cumulative histogram does not,
+and the two disagreed by up to 9 luma levels. It reached a decision: 603 pixels at 151 and
+7 at 250 give **p99 = 241.09 interpolated and 250.00 snapped**, which crosses `pick`'s
+`p99 >= 250` and silently changes the preset. Now reproduces numpy to 9e-16 across 2000
+random arrays. `verify` never touches percentiles, so the guard was never affected — worth
+stating, because "it's in the measurement code" is not the same as "it's in the guard".
+
+**Sampling barely sampled.** `select` without `-fps_mode passthrough` lets ffmpeg's default
+sync duplicate frames back up to a constant rate, so `every=20` decoded ~70% of the clip
+rather than 5%. The comments calling it a speed knob were describing an intention. Now
+`every=20` on a 60-frame clip decodes 3 frames.
+
+**The rails had no test.** `counts[254:]` -> `counts[255:]` and `counts[:2]` -> `counts[:1]`
+both passed the entire suite. `pick` and `verify` only need gross classification, so nothing
+pinned where the rail actually starts. `summarise(counts)` is now separate from `stats(path)`
+so the boundary can be asserted without an encoder in the way.
+
+### The rejected suggestion is the most valuable result
+
+The simplicity review was asked whether ffmpeg's own `signalstats` could replace the numpy
+histogram entirely. It built that version and found it computes **silently wrong numbers**:
+
+```
+                numpy    signalstats mask
+bright         67.19%          12.85%
+dark          100.00%          51.17%
+gap_graded     22.50%          22.50%   <- agrees, misleadingly
+```
+
+Feeding a constant through `lutyuv` emits **214 for a requested 200** — `(200-16)*255/219`
+— a limited-to-full range rescale inside the filter graph that a plain `format=gray` decode
+does not apply. The two fixtures that agreed did so only because their damage sits exactly
+on the 0/255 rails, which a range rescale leaves fixed. **A partial agreement on the cases
+you happen to test is the most dangerous result available**, and it is the mismatched-baseline
+error again, this time hiding inside ffmpeg's colorspace negotiation.
+
+### What was simplified
+
+Reading `frame_bytes * 8` per iteration measured *slower* than one frame at a time (1.60s
+against 1.38s on 200 frames at 1080p) — a guessed constant that cost performance and
+clarity. And `finish.sh` called `grade.py pick` twice for the same clip, once for the filter
+and once for the name, decoding the whole render each time; `--both` makes it one call.
+
+The memory justification held up under measurement rather than assertion: 622MB for 300
+frames at 1080p, extrapolating to 3.07GB for the real clip, against ~2KB of bins.

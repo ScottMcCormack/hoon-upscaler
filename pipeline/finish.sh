@@ -147,8 +147,13 @@ BASE_FPS=$(cat "$W/base_fps.txt")
 # than from the source, because the grade is applied to THIS, and the luma step has
 # already moved the levels.
 if [ -z "$GRADE" ]; then
-  GRADE="$(python "$HERE/grade.py" pick "$W/stab.mkv")"
-  echo "    grade: $(python "$HERE/grade.py" pick "$W/stab.mkv" --name) preset"
+  # One call, not two: each invocation decodes the whole stabilised render, so asking
+  # separately for the name and the filter measured the same clip twice for no reason.
+  PICKED="$(python "$HERE/grade.py" pick "$W/stab.mkv" --both)"
+  GRADE_NAME="$(printf '%s\n' "$PICKED" | sed -n 1p)"
+  GRADE="$(printf '%s\n' "$PICKED" | sed -n 2p)"
+  [ -n "$GRADE" ] || { echo "!! grade.py pick returned no filter"; exit 1; }
+  echo "    grade: $GRADE_NAME preset"
 else
   echo "    grade: explicit (GRADE was set)"
 fi

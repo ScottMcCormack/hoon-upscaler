@@ -37,6 +37,38 @@ Build metrics only for things with objective definitions — frame counts, timin
 boundary alignment, file integrity. Those were reliable throughout. For "does this look
 right", produce a visual comparison and ask.
 
+**A standard applied once is not applied.** Three times now, a correct check went into one
+place and not its symmetric twin, in the same commit:
+
+- `RES` required `^[0-9]+$` while the override validation twenty lines away required
+  `^[0-9]+$` *and* `-gt 0`. `RES=0` ran and wrote `"resolution": 0` into a manifest.
+- The commit fixing that added an empty-string guard for the mode and not for the
+  resolution, though `${1:-720}` and `${2:-full}` substitute identically. An empty first
+  argument then selected the chargeable full render at a resolution nobody chose.
+- The manifest test checked nine keys for *shape* and none for *content*, so a manifest
+  hardcoded to `"resolution": 999` passed it.
+
+Having had the idea is not evidence of having applied it. When you tighten a check, grep
+for every other place that takes the same kind of input and tighten those in the same
+commit — the untightened twin is where the next bug lives.
+
+**Every wrong conclusion in this project came from a mismatched baseline, not a bad idea.**
+Four times now, a measurement was sound and its *comparison* was not:
+
+- A full re-render matched the previous deliverable byte-for-byte, which read as proof the
+  changes were safe. It was two defects cancelling — an off-by-one adding a frame and
+  `-shortest` removing one. An endpoint comparison cannot tell that from correctness.
+- The cross-dissolve was scored against the raw interpolated stream rather than against the
+  no-ease variant, producing "there is no discontinuity to fix" — the opposite of the truth.
+- Camera displacement across two stalls measured 0.00px, because the frames being compared
+  both sat inside the same hold. They actually carry 4.17 and 3.55px.
+- SeedVR2 was declared non-deterministic by comparing a batch-33 render against a batch-65
+  master. Different parameters, so the comparison says nothing about determinism.
+
+Before trusting a comparison, state what differs between the two things. If more than the
+variable under test differs, the number is not evidence. A null control — the same statistic
+computed where the effect should not appear — catches most of it.
+
 ## Ordering rules — most bugs were a sensible step in the wrong place
 
 - **Never denoise before the restoration model.** `hqdn3d` helped Real-ESRGAN and badly
@@ -63,8 +95,11 @@ right", produce a visual comparison and ask.
 - **RTX 5060 Ti is Blackwell, sm_120.** Stock PyTorch builds (cu124/126/128) have no
   kernels for it — install with `--index-url .../whl/cu130`. Cloud Ampere/Ada cards (A40,
   A100, L40S) take stock builds; another Blackwell (RTX 5090) repeats the trap.
-- **16GB VRAM is a cliff, not a curve.** Below it ~1.3s/frame, above ~25s/frame — 19×
-  from a 25% resolution increase. An A40 48GB at $0.44/hr removes it for about $1 a job.
+- **16GB VRAM is a cliff, not a curve.** On the local RTX 5060 Ti: below it ~1.3s/frame,
+  above ~25s/frame — 19× from a 25% resolution increase, still completing. A 16GB *A4000*
+  instead OOMs outright at 720 (`docs/findings.md`); same capacity, different failure. Do
+  not treat one as evidence for the other. An A40 48GB removes it — $0.49/hr as of Sept 2026, and
+  a measured $0.34 for the whole clip at 720 including setup.
 - **15GB system RAM.** Long clips held entirely in memory trigger the OOM killer. Use
   chunked/streaming modes; check `dmesg | grep -i oom-kill` when a process dies silently.
 - **Venvs cannot be created on `/mnt/z`** (Windows mount) — installs fail on file copies.

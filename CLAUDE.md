@@ -37,6 +37,21 @@ Build metrics only for things with objective definitions — frame counts, timin
 boundary alignment, file integrity. Those were reliable throughout. For "does this look
 right", produce a visual comparison and ask.
 
+**A standard applied once is not applied.** Three times now, a correct check went into one
+place and not its symmetric twin, in the same commit:
+
+- `RES` required `^[0-9]+$` while the override validation twenty lines away required
+  `^[0-9]+$` *and* `-gt 0`. `RES=0` ran and wrote `"resolution": 0` into a manifest.
+- The commit fixing that added an empty-string guard for the mode and not for the
+  resolution, though `${1:-720}` and `${2:-full}` substitute identically. An empty first
+  argument then selected the chargeable full render at a resolution nobody chose.
+- The manifest test checked nine keys for *shape* and none for *content*, so a manifest
+  hardcoded to `"resolution": 999` passed it.
+
+Having had the idea is not evidence of having applied it. When you tighten a check, grep
+for every other place that takes the same kind of input and tighten those in the same
+commit — the untightened twin is where the next bug lives.
+
 **Every wrong conclusion in this project came from a mismatched baseline, not a bad idea.**
 Four times now, a measurement was sound and its *comparison* was not:
 

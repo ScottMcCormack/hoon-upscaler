@@ -508,3 +508,28 @@ repository's first commit is 2026-08-29 — nothing in it can be months old. An 
 interval, in the document that catalogues other unverified claims, added because it made
 the finding sound weightier. Dates are cheap to check: `git log --diff-filter=A` settles
 every one of them.
+
+
+## The fix for an asymmetry was itself asymmetric, 2026-09-07
+
+Round three of the adversarial review found one defect, and it was in the fix from round
+one. The commit titled *"Apply the same integer standard to every argument the runner
+accepts"* added an explicit-empty guard for the mode and did not add one for the
+resolution, though `${1:-720}` and `${2:-full}` substitute on empty identically.
+
+The resolution case is the worse of the two. A lone empty argument also leaves `$2` unset,
+so `run_on_pod.sh ""` selects **720 and full** — the chargeable render, at a resolution
+nobody chose — completes, and writes a manifest reading `"resolution": 720, "mode": "full"`
+with nothing to mark it as unintended. Confirmed by execution against the stub harness.
+
+That is three instances of the same shape: `RES` vs the override validation, the mode guard
+vs the resolution guard, and the manifest test's shape checks vs its absent content checks.
+Each time the reasoning was written down correctly and applied to one of two places.
+
+The rule now in CLAUDE.md: when you tighten a check, grep for every other input of the same
+kind and tighten those in the same commit. The untightened twin is where the next bug lives.
+
+Worth noting what caught it. Two rounds of review had already read this file, and the
+defect survived both because it was introduced *by* the first round's fix. New code written
+in response to a review is not reviewed code, and is disproportionately likely to be wrong —
+it is written quickly, under the impression that the area is now understood.

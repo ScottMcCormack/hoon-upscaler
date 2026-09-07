@@ -27,6 +27,14 @@ esac
 # Reject extra arguments rather than ignoring them: a mistyped invocation should say so,
 # not quietly run something adjacent to what was meant.
 [ "$#" -le 2 ] || { echo "!! unexpected extra argument(s): ${*:3}"; exit 1; }
+# Omitting the resolution means 720. An explicitly EMPTY one is a wrapper passing through
+# a variable it never set, and ${1:-720} cannot tell the two apart — the same hole the
+# mode guard below closes. Left open it is worse than the mode case, because a lone empty
+# argument also leaves $2 unset, so the run silently becomes the chargeable full render at
+# a resolution nobody chose, and the manifest records it as though it were deliberate.
+if [ "$#" -ge 1 ] && [ -z "${1:-}" ]; then
+  echo "!! resolution was given but empty. Pass a resolution explicitly, e.g. 720."; exit 1
+fi
 RES="${1:-720}"
 # Same reasoning as the VRAM guard below: a non-integer here makes `[ "$RES" -ge 720 ]`
 # error inside an `if`, which set -e does not catch, so the low-VRAM OOM warning would

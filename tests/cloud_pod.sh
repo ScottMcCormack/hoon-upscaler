@@ -175,6 +175,18 @@ clean; assert_stderr_matches "guard: a zero resolution is refused" "resolution m
 clean; assert_stderr_matches "guard: an explicitly empty mode is refused" "mode was given but empty" \
   env PATH="$STUB:$PATH" WORKSPACE="$WS" bash "$CLOUD/run_on_pod.sh" 720 ""
 
+# The same hole on the other positional. ${1:-720} substitutes on empty exactly as
+# ${2:-full} did, so a wrapper leaking an unset resolution got 720 AND, with no second
+# argument, the chargeable full render — and a manifest reading "resolution": 720 as
+# though someone had chosen it. Guarding the mode and not the resolution was the same
+# asymmetry that let RES=0 through: the standard has to be applied to every argument,
+# not to the one the bug report happened to name.
+clean; assert_stderr_matches "guard: an explicitly empty resolution is refused" "resolution was given but empty" \
+  env PATH="$STUB:$PATH" WORKSPACE="$WS" bash "$CLOUD/run_on_pod.sh" ""
+
+clean; assert_stderr_matches "guard: an empty resolution is refused even with a mode" "resolution was given but empty" \
+  env PATH="$STUB:$PATH" WORKSPACE="$WS" bash "$CLOUD/run_on_pod.sh" "" test
+
 # A third argument used to be ignored, so a typo'd flag ran the default render instead.
 clean; assert_stderr_matches "guard: extra arguments are refused" "unexpected extra argument" \
   env PATH="$STUB:$PATH" WORKSPACE="$WS" bash "$CLOUD/run_on_pod.sh" 720 test --dry-run

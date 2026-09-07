@@ -2087,3 +2087,36 @@ measured border intrusion; the y offset of 44 discards the top rows, which sit a
 251-253 and are clipped white. The car falls entirely inside for 97.3% of detected frames and
 overlaps for 99.6% — the shortfall is the closing approach, where the car is larger than the
 crop, which is intended. AR 1.762, close to the original deliverable's 312x176 (1.773).
+
+## A clean auto-merge produced a script that refused its own feature, 2026-09-07
+
+Rebasing the second-clip branch onto main after PR #5 merged, `cloud/run_on_pod.sh`
+auto-merged with no conflict. The result was broken:
+
+```
+line 33:  [ "$#" -le 2 ] || { echo "!! unexpected extra argument(s)"; exit 1; }
+line 56:  CLIP="${3:-}"
+```
+
+PR #5 added the argument-count guard when two positional arguments was the whole
+interface. The second-clip branch added `CLIP` as a third. Both edits are correct against
+the base they were written on, they touch different lines, and git merged them happily.
+Every named-clip invocation would have been refused by a guard added to prevent typos.
+
+Two conflicts in the same rebase *did* raise markers, both trivially resolvable — the ones
+git flagged were additive text in `docs/findings.md` and `tests/cloud_pod.sh`, while the one
+that mattered went through silently. Conflict markers mark textual overlap, not
+contradiction.
+
+The test suite did not catch it either, and could not have: `tests/cloud_pod.sh` came from
+the branch and never invoked more than two arguments on the main side, while main's
+`guard: extra arguments are refused` case passed `720 test --dry-run` — which after the
+merge is not an extra argument at all, but a clip named `--dry-run`. That test kept
+passing for the wrong reason, refusing on a missing input rather than on argument count.
+It now passes four arguments.
+
+The rule this earns: **after any auto-merge, re-read the merged region of a file whose
+interface either side changed.** Not the diff — the merged result. A diff shows each side's
+change as reasonable; only the combined file shows they contradict. The cheap check is to
+run the feature each branch added, since a passing suite proves only that the tests that
+existed still pass.

@@ -2198,3 +2198,60 @@ an extra usage line inserted just before the closing separator (standing in for 
 future docstring edit, without waiting for one to actually happen) and confirms `--help`
 still shows it, with no accompanying change to the selection logic itself. Mutation-tested:
 reverting to the fixed-range form fails exactly this new test and no other.
+## The launcher, executed for the first time 2026-09-07
+
+`cloud/run_on_pod.sh` runs *on* a pod. Getting a pod, putting the input on it, retrieving
+the render and shutting it down again was never in the repository - it lived in an
+untracked local script that was deleted, which is why `docs/findings.md` could describe an
+`EXIT` trap with no referent. `cloud/launch_pod.sh` is that script, and this is what
+running it found.
+
+**Three defects, none visible on reading, none catchable by a stub.**
+
+*The pod id parse killed the script silently.* `POD_ID="$(... | grep ... )"` under
+`set -euo pipefail`: grep matched nothing, `pipefail` failed the pipeline, and the failing
+command substitution exited the script **before** the `[ -n "$POD_ID" ]` diagnostic that
+would have printed the response. A live pod, no error, no id. This is the exact trap
+CLAUDE.md documents and that had just been written into a review brief for someone else.
+The `|| true` on that assignment is load-bearing.
+
+*The SSH details were read from the wrong place.* The parser looked for
+`runtime.ports[].privatePort == 22`. On this API version `runtime` is `null` even while
+`runtimeStatus` is `running`, and the details sit in a top-level `ssh` object with `ip` and
+`port`. The script waited ten minutes for an array that never appears. Both shapes are now
+read, newest first.
+
+*Six `[ test ] && cmd` statements were fatal.* As a bare statement, that returns 1 when the
+test is false, which under `set -e` exits. Every one was an optional step - adding an ssh
+identity, appending an override to an env string.
+
+**What the failures proved, which a successful first run would not have.** Run 1 left a pod
+with no id recorded. The cleanup found it by name and removed it, confirmed against the pod
+list. That fallback existed only because the terminate path was hardened before spending
+anything, and it is the difference between a two-cent lesson and an A40 billing until
+someone notices. Run 2 was stopped with `SIGTERM` rather than left to time out, which
+exercised the trap on signal.
+
+**A ceiling that only works when the script is healthy is not a cost guard.** `MAX_MIN` is
+tested in the polling loop's `while` condition, so while the script is blocked inside an
+`ssh` call it is never evaluated. An independent watchdog - separate process, absolute
+deadline, terminates any `hoon-` pod regardless of what the script is doing - is what
+actually bounds the cost. The in-script ceiling bounds the *normal* case only.
+
+**The successful run.** 7m30s render, 7m48s total from pod creation to teardown.
+
+```
+214 frames, 1276x720, sha256 3f0d0cf8fd21c786e68349869f148c93ff288040b05ad2c48ab0c567e20ba09d
+A40 46068MB, torch 2.8.0.dev20250319+cu128, batch 33 / overlap 5
+```
+
+Verified three ways after the pod was gone: the manifest the pod wrote, an independent
+`ffprobe` frame count, and an independent `sha256sum` locally. The transfer check runs
+*before* teardown deliberately - once the pod is deleted, a truncated download and a
+truncated render are indistinguishable.
+
+**A self-matching `pgrep`, again.** The wait loop watching for the script to exit matched
+its own command line and could never exit. Same defect as the waiter that once spun for 17
+hours. Killed by PID, which is the only reliable way.
+
+Total cost of the exercise, including two aborted runs: about $0.08.

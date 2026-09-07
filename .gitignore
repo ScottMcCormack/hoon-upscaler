@@ -66,3 +66,9 @@ experiments/*
 # that swept up the output of a pod test run.
 cloud/sr_*.json
 cloud/.pod_id
+
+# --- flash CLI state ---
+# .flash/logs/activity.log was tracked and has been empty in every committed version, so
+# nothing leaked. It is still the log of the CLI whose `flash login` writes an api_key,
+# and a log file inside the repo is one careless command from committing a credential.
+.flash/

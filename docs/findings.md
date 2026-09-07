@@ -533,3 +533,47 @@ Worth noting what caught it. Two rounds of review had already read this file, an
 defect survived both because it was introduced *by* the first round's fix. New code written
 in response to a review is not reviewed code, and is disproportionately likely to be wrong —
 it is written quickly, under the impression that the area is now understood.
+
+## Round three, part two: the same fix missing from a fourth file, twice
+
+The tests-and-docs review found five defects. Two of them are the rule from the section
+above, caught in the act.
+
+**"Months" survived in `cloud/run_on_pod.sh`.** The correction went to `CLAUDE.md`,
+`docs/findings.md` and `masters/README.md`. The runner — the file the whole story is about,
+and the one under test — kept the false claim in two comments. **The README kept the
+conflated 16GB cliff** for the same reason: the correction was applied to three files and
+the fourth was not searched for. Both were fixed by grepping rather than by remembering.
+
+**The timeout diagnostic was dead code from the moment it was written.** The branch tested
+for exit status 137 on the reasoning that `--signal=KILL` produces 128+9. `timeout` reports
+**124** whenever it fires, whatever signal it sent; the signal only reaches the status with
+`--preserve-status`. So the helpful message never appeared and the generic one did. Written,
+committed, and never once executed - `timeout --signal=KILL 1 sleep 5; echo $?` would have
+settled it in two seconds. The value is also no longer hardcoded into its own message,
+which had already desynced during testing.
+
+**Format checks are not content checks, still.** Round two tightened `sha256` from
+truthiness to a 64-hex regex, which a `sha256()` returning `"ab" * 32` satisfies - the same
+fixed, content-blind value for two different files. `gpu.name`, `torch` and
+`seedvr2_commit` were regex-checked only, so `"Definitely Not A40"`, torch `9.9.9` against
+a stub reporting `2.4.0`, and a well-formed fabricated commit all passed. The test now
+recomputes both hashes from the files on disk and compares the three environment fields
+against what the stubs are configured to emit.
+
+Tightening a check one notch is how this survived two rounds: truthiness to format looks
+like progress and stops short of the actual question, which is whether the value is *true*.
+
+**Two of three VRAM branches never had their arguments checked.** Only the top branch's
+real `--batch_size`/`--temporal_overlap` were verified, through the happy-path manifest.
+The other two were confirmed by their banner text alone, so setting the fp8 branch's
+`EXTRA` to `--batch_size 999 --temporal_overlap 999` passed the entire suite while printing
+the correct banner. The bottom branch is the least checked and the most complex - it carries
+the offload flags and covers the widest VRAM range. Both are now pinned to their manifests.
+
+**A fixture that was too convenient.** Adding the recomputed-hash check immediately failed
+with "input and output sha256 are identical". Not a bug in the check: the stub built its
+output from the same `testsrc2` at the same settings as the input, so the two files were
+byte-identical, and a bug recording the input's hash for the output would have been
+invisible. The stub now emits a different pattern at a different size, which is also what a
+real upscale does.

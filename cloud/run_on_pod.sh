@@ -139,7 +139,7 @@ fi
 # Replaying a recorded master. The branch above picks settings from VRAM, which is right
 # for a fresh render and wrong for reproducing one: the 720p master was made at batch 65
 # and no card selects that today. SeedVR2 is deterministic given identical parameters -
-# verified twice, including a byte-for-byte recreation of the 1080p master months after
+# verified twice, including a byte-for-byte recreation of the 1080p master seven days after
 # it was made - so a manifest plus these overrides recreates a master exactly.
 if [ -n "${BATCH_SIZE:-}" ] || [ -n "${TEMPORAL_OVERLAP:-}" ]; then
   # Fall back to what the VRAM branch just chose, NOT to the 48GB defaults. Otherwise
@@ -213,7 +213,7 @@ fi
 echo "frame check OK: $OUT_N frames, matching input"
 
 # A manifest beside every master. SeedVR2 IS reproducible given identical parameters -
-# the 1080p master was recreated byte-for-byte months later - which is exactly why the
+# the 1080p master was recreated byte-for-byte seven days later - which is exactly why the
 # parameters must be recorded: they are the whole of what makes a render repeatable.
 # Without them you cannot even tell whether two renders differ because of the model or
 # because they were asked for different things. That question cost a wasted comparison

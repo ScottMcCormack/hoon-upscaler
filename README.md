@@ -138,9 +138,12 @@ in the wrong coordinates. Producing the STABFIRST intermediate is left undocumen
 
 ## Renting a GPU
 
-A 16GB card hits a hard wall above ~1021×576 output — throughput drops roughly 19× as
-model blocks swap to system RAM. An **A40 48GB** on RunPod removes it, and 1080p becomes
-possible at all.
+16GB is not enough, in two different ways depending on the card. The local RTX 5060 Ti
+completes above ~1021×576 but throughput drops roughly 19× as model blocks swap to system
+RAM. A cloud RTX A4000, tested 2026-09-04, does not degrade — it fails: 720 dies with
+`torch.OutOfMemoryError` inside the VAE, producing nothing, while 540 runs fine. Do not
+plan around the graceful case; if you rent 16GB, expect the crash. An **A40 48GB** removes
+both, and makes 1080p possible at all.
 
 Measured on 2026-09-04, end to end via `cloud/run_on_pod.sh`:
 
@@ -156,8 +159,8 @@ catches a broken setup in five minutes rather than forty.
 Pick **Ampere or Ada** (A40, A100, L40S), not Blackwell — see `CLAUDE.md`.
 
 All three VRAM branches were measured on hardware; `docs/findings.md` has the table. The
-short version: a 24GB card matches a 48GB card for speed at this clip size, and a 16GB card
-runs out of memory at 720 but is fine at 540.
+short version: a 24GB card matches a 48GB card for speed at this clip size, and the 16GB
+A4000 runs out of memory at 720 but is fine at 540.
 
 The runner needs two inputs beside it, neither of which is in the repo since both are
 media. Build them from the stabilised source, then upload both to the pod:

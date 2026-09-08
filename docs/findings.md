@@ -794,3 +794,36 @@ and once for the name, decoding the whole render each time; `--both` makes it on
 
 The memory justification held up under measurement rather than assertion: 622MB for 300
 frames at 1080p, extrapolating to 3.07GB for the real clip, against ~2KB of bins.
+
+## Failing loudly is not the same as failing safely, 2026-09-08
+
+A second Copilot review on the grading PR, after the first round's fixes. Three findings,
+all correct, all verified by execution before being accepted.
+
+**The deliverable was written before it was checked.** `finish.sh` encoded the graded render
+straight to `OUT_DIR` and ran the clipping guard afterwards. `set -e` stops the pipeline on a
+refusal, which felt sufficient - but by then the destroyed file is sitting where a
+deliverable belongs, and it has already overwritten the previous good render. Both encodes
+now go to the work directory and are moved into place only after the guard passes.
+
+The distinction is worth naming: **failing loudly is not the same as failing safely.** This
+project has already shipped one plausible-looking bad file - a truncated render that only
+its duration gave away - so a bad artifact in the output directory is exactly the failure
+mode that survives an error message nobody scrolls back to read.
+
+**A friendly diagnostic that could never run.** `dims()` called ffprobe with `check=True`,
+which raises `CalledProcessError` before the "missing, unreadable, or not a video" message
+below it. On the commonest bad input - a path that is not a video - it produced a traceback.
+Dead code written in the same commit as the check it defeats, which is the third instance of
+that shape in this branch after the `timeout` 137 branch and the mode/resolution guard pair.
+
+**A relative import three lines from a correct one.** The new rails test did
+`sys.path.insert(0, "pipeline")`, rooted at the caller's working directory, while the
+existing snippet in the same file passes `"$REPO"` in for exactly this reason. Running
+`bash /path/to/tests/run.sh grade` from anywhere else failed to import `grade`. Confirmed by
+running the suite from `/tmp` - 11 passed, 1 failed - and fixed by copying the pattern that
+was already there.
+
+The pattern across all three: each was introduced *by* a fix from the previous review round.
+New code written in response to review is not reviewed code, and this is now the second time
+that has been the round's main lesson.

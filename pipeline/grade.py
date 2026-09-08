@@ -71,9 +71,12 @@ def dims(path):
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "v:0",
          "-show_entries", "stream=width,height", "-of", "csv=p=0", path],
-        capture_output=True, text=True, check=True).stdout.strip()
+        capture_output=True, text=True).stdout.strip()   # no check=: see below
     w, _, h = out.partition(",")
     if not (w.isdigit() and h.strip().rstrip(",").isdigit()):
+        # Reached by letting ffprobe fail quietly rather than with check=True, which
+        # raised CalledProcessError before this line could run - so the friendly message
+        # was dead code for the commonest case, a path that is not a video at all.
         raise SystemExit(
             f"!! {path}: could not read dimensions (ffprobe said {out!r}). "
             f"The file is missing, unreadable, or not a video.")

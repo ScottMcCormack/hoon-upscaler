@@ -161,18 +161,25 @@ echo "    $GRADE"
 ffmpeg -y -v error -r "$BASE_FPS" -f concat -safe 0 -i "$W/concat.txt" -i "$SRC_ORIG" \
   -map 0:v:0 -map 1:a:0? -r "$BASE_FPS" \
   -vf "$GRADE" -c:v libx264 -preset medium -crf 17 -pix_fmt yuv420p \
-  -c:a aac -b:a 128k -movflags +faststart "$OUT_DIR/${TAG}_lumafix_14fps.mp4"
+  -c:a aac -b:a 128k -movflags +faststart "$W/graded.mp4"
 ffmpeg -y -v error -r "$BASE_FPS" -f concat -safe 0 -i "$W/concat.txt" -i "$SRC_ORIG" \
   -map 0:v:0 -map 1:a:0? -r "$BASE_FPS" \
   -c:v libx264 -preset medium -crf 17 -pix_fmt yuv420p \
-  -c:a aac -b:a 128k -movflags +faststart "$OUT_DIR/${TAG}_lumafix_14fps_ungraded.mp4"
+  -c:a aac -b:a 128k -movflags +faststart "$W/ungraded.mp4"
 
 # A grade that pins pixels to a rail has deleted the differences between them, and
 # nothing downstream recovers that. This check is why the 51.8% clip could not ship
 # again unnoticed; it is objective, unlike anything about whether the grade looks good.
+# Both renders are still in the work directory. A rejected grade must not reach OUT_DIR:
+# set -e stops the pipeline either way, but writing the deliverable first means a refusal
+# leaves a destroyed file sitting where a deliverable belongs, having already overwritten
+# the previous good one. This project has shipped a plausible-looking bad file before -
+# a truncated render that only its duration gave away - so "it failed loudly" is not
+# enough on its own. Verify, then move.
 echo "### grade check"
-python "$HERE/grade.py" verify "$OUT_DIR/${TAG}_lumafix_14fps_ungraded.mp4" \
-  "$OUT_DIR/${TAG}_lumafix_14fps.mp4"
+python "$HERE/grade.py" verify "$W/ungraded.mp4" "$W/graded.mp4"
+mv "$W/graded.mp4"   "$OUT_DIR/${TAG}_lumafix_14fps.mp4"
+mv "$W/ungraded.mp4" "$OUT_DIR/${TAG}_lumafix_14fps_ungraded.mp4"
 
 echo "### [4/5] 60fps interpolation"
 # minterpolate ends before its last input frame - it has nothing to interpolate into -

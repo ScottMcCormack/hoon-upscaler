@@ -438,9 +438,9 @@ if want grade; then
   # The rail boundaries themselves. Both off-by-ones (254->255, 1->0) passed every other
   # test in this group, because pick() and verify() only need gross classification and
   # never care exactly where the rail starts.
-  RAILS="$(python - <<'PY'
+  RAILS="$(python - "$REPO" <<'PY'
 import sys
-sys.path.insert(0, "pipeline")
+sys.path.insert(0, sys.argv[1] + "/pipeline")
 import numpy as np, grade
 bad = []
 for lv, want_c, want_x in ((0,0,1), (1,0,1), (2,0,0), (253,0,0), (254,1,0), (255,1,0)):
@@ -496,6 +496,27 @@ PY
     *"destroying picture"*) ok "grade: an explicit GRADE is still checked" ;;
     *) bad "grade: an explicit GRADE is still checked" "a 4x contrast grade was accepted" ;;
   esac
+
+  # Failing loudly is not enough: the encode used to be written straight to OUT_DIR and
+  # verified afterwards, so a refusal left the destroyed render sitting where a
+  # deliverable belongs, having already overwritten the previous good one. Render a good
+  # one, then attempt a destructive grade over the top of it.
+  rm -rf "$GOUT"; mkdir -p "$GOUT"
+  bash "$REPO/pipeline/finish.sh" "$RAW" G "$SRC" "$GOUT" >/dev/null 2>&1
+  GOOD="$GOUT/G_lumafix_14fps.mp4"
+  if [ ! -f "$GOOD" ]; then
+    bad "grade: a rejected grade does not replace a good render" "no baseline render produced"
+  else
+    BEFORE="$(sha256sum "$GOOD" | cut -d" " -f1)"
+    GRADE="eq=contrast=4.0" bash "$REPO/pipeline/finish.sh" "$RAW" G "$SRC" "$GOUT" >/dev/null 2>&1
+    AFTER="$(sha256sum "$GOOD" | cut -d" " -f1)"
+    if [ "$BEFORE" = "$AFTER" ]; then
+      ok "grade: a rejected grade does not replace a good render"
+    else
+      bad "grade: a rejected grade does not replace a good render" \
+          "the deliverable changed after a grade that was refused"
+    fi
+  fi
 fi
 
 # ---------------------------------------------------------------------------

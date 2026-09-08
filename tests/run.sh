@@ -30,7 +30,10 @@ want() { [ -z "$FILTER" ] || [[ "$1" == *"$FILTER"* ]]; }
 # This refuses rather than skipping. A suite that quietly runs a subset is how coverage
 # disappears without anyone deciding to drop it.
 missing=""
-for c in ffmpeg ffprobe python; do
+# `timeout` is GNU coreutils and the cloud group depends on it. macOS ships no `timeout`
+# at all, so without this the preflight passes and the cloud suite reports a bare exit 127
+# - the generic message this preflight exists to replace.
+for c in ffmpeg ffprobe python timeout; do
   command -v "$c" >/dev/null 2>&1 || missing="$missing $c"
 done
 if [ -z "$missing" ]; then
@@ -44,7 +47,15 @@ if [ -n "$missing" ]; then
   case "$missing" in
     *ffmpeg*|*ffprobe*)
       echo "   ffmpeg and ffprobe are not pip-installable:" >&2
-      echo "     apt install ffmpeg     # or brew install ffmpeg" >&2 ;;
+      echo "     apt install ffmpeg     # or brew install ffmpeg" >&2
+      echo >&2 ;;
+  esac
+  case "$missing" in
+    *timeout*)
+      echo "   \`timeout\` is GNU coreutils. macOS does not ship it:" >&2
+      echo "     brew install coreutils" >&2
+      echo "     PATH=\"\$(brew --prefix coreutils)/libexec/gnubin:\$PATH\"   # exposes it as \`timeout\`" >&2
+      echo >&2 ;;
   esac
   case "$missing" in
     *python*)
@@ -152,6 +163,13 @@ if want stabilise; then
     -vf "geq=lum='clip(lum(X,Y)+14*sin(N*1.1),0,255)':cb='cb(X,Y)':cr='cr(X,Y)'" \
     -c:v libx264 -crf 18 -pix_fmt yuv420p "$HUNT"
   python "$REPO/pipeline/luma_stabilise.py" "$HUNT" "$STAB" 31 1.0 >/dev/null 2>&1
+  STAB_RC=$?
+  # Separate from the checks below, and not implied by them. The writer releases the
+  # output file before its final reporting block, so a failure after that point leaves a
+  # complete, correct video whose frame count and flicker both pass - while the real
+  # pipeline, running under `set -euo pipefail`, aborts. A test that passes where
+  # production fails is worse than no test.
+  assert_eq "stabilise: exits 0" "0" "$STAB_RC"
 
   if [ ! -f "$STAB" ]; then
     bad "stabilise: produces an output" "no $STAB"

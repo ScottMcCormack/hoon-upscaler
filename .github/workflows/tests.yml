@@ -7,10 +7,21 @@
 # itself to is that a test which cannot fail is worse than none. That standard is worth
 # nothing if the suite only runs when someone remembers.
 #
-# What this can and cannot tell you: the suite is entirely stub-driven — no GPU, no model,
-# no media from input/ or masters/. It proves the pipeline's own logic. It cannot prove
-# anything about the environment a real render lands in; the first real pod run died on
-# PEP 668 with a green suite behind it.
+# What a green run does and does not mean. The stubbing is narrower than "everything":
+#
+#   Really executed  ffmpeg and ffprobe end to end through pipeline/finish.sh (concat,
+#                    grade, interpolation, trim), OpenCV in luma_stabilise.py and the
+#                    analysis tools, and every guard and argument check.
+#   Stubbed          the GPU layer only — nvidia-smi, the SeedVR2 inference call, and pip,
+#                    all faked by tests/cloud_pod.sh so the cloud runner's logic can be
+#                    driven without a card.
+#   Not covered      the environment a real render lands in. The stub pip is a no-op, so
+#                    it sailed past the PEP 668 failure that killed the first real pod run
+#                    before inference started. Fixtures are synthetic and tiny; nothing
+#                    here touches input/ or masters/.
+#
+# So a green run is real evidence about the pipeline's behaviour, not merely its wiring —
+# but it says nothing about a GPU, a model, or a machine this workflow has never seen.
 name: tests
 
 on:

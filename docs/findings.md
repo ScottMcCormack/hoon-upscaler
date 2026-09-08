@@ -3,6 +3,44 @@
 What was tried and ruled out, so it isn't repeated. Source throughout: a 2007 Nokia N90
 clip, 352×288, 15fps VFR, mpeg4 at 509kbps.
 
+## Contents
+
+Roughly chronological within each group. Every entry records something that was
+tried and settled, so it is not tried again; `CONTRIBUTING.md` sets the standard for
+adding one.
+
+**What the model needs**
+
+- [Pre-filters — roughly twenty variants, all unnecessary in the end](#pre-filters--roughly-twenty-variants-all-unnecessary-in-the-end)
+- [Models](#models)
+- [Upscale ratio](#upscale-ratio)
+- [Temporal batch width](#temporal-batch-width)
+
+**Measuring the unmeasurable**
+
+- [Metrics that failed](#metrics-that-failed)
+- [The seventh metric, which worked — and the control that made it trustworthy](#the-seventh-metric-which-worked--and-the-control-that-made-it-trustworthy)
+
+**Timing and interpolation**
+
+- [Motion and timing](#motion-and-timing)
+- [Interpolation and stall handling — five things ruled out, 2026-09-03](#interpolation-and-stall-handling--five-things-ruled-out-2026-09-03)
+
+**Renting a GPU**
+
+- [The cloud runner, first executed 2026-09-04](#the-cloud-runner-first-executed-2026-09-04)
+- [All three VRAM branches, measured on hardware 2026-09-04](#all-three-vram-branches-measured-on-hardware-2026-09-04)
+- [Record the parameters or the render is uninterpretable](#record-the-parameters-or-the-render-is-uninterpretable)
+- [Durable output and A40 availability are currently mutually exclusive](#durable-output-and-a40-availability-are-currently-mutually-exclusive)
+- [A pod is not necessarily yours alone](#a-pod-is-not-necessarily-yours-alone)
+
+**What review keeps finding**
+
+- [Argument validation, reviewed adversarially 2026-09-06](#argument-validation-reviewed-adversarially-2026-09-06)
+- [The tests that guarded the manifest could not read it, 2026-09-06](#the-tests-that-guarded-the-manifest-could-not-read-it-2026-09-06)
+- [The fix for an asymmetry was itself asymmetric, 2026-09-07](#the-fix-for-an-asymmetry-was-itself-asymmetric-2026-09-07)
+- [Round three, part two: the same fix missing from a fourth file, twice](#round-three-part-two-the-same-fix-missing-from-a-fourth-file-twice)
+
 ## Pre-filters — roughly twenty variants, all unnecessary in the end
 
 The model speckled in dark areas. The cause turned out to be the **chain-link fence**:

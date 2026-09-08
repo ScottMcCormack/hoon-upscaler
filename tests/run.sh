@@ -20,6 +20,63 @@ source "$REPO/tests/lib.sh"
 
 want() { [ -z "$FILTER" ] || [[ "$1" == *"$FILTER"* ]]; }
 
+# --- preflight ---------------------------------------------------------------
+# Without this, a checkout that has not installed the requirements produces roughly
+# fifteen ModuleNotFoundError tracebacks and no explanation. That is not a hypothetical:
+# it is what a git worktree gives you, because the venv lives in the main checkout and
+# does not come along, and two review agents each lost time to it - one reporting a red
+# baseline that had nothing to do with the code under review.
+#
+# This refuses rather than skipping. A suite that quietly runs a subset is how coverage
+# disappears without anyone deciding to drop it.
+missing=""
+# `timeout` is GNU coreutils and the cloud group depends on it. macOS ships no `timeout`
+# at all, so without this the preflight passes and the cloud suite reports a bare exit 127
+# - the generic message this preflight exists to replace.
+for c in ffmpeg ffprobe python timeout; do
+  command -v "$c" >/dev/null 2>&1 || missing="$missing $c"
+done
+if [ -z "$missing" ]; then
+  for m in numpy cv2; do
+    python -c "import $m" >/dev/null 2>&1 || missing="$missing python:$m"
+  done
+fi
+if [ -n "$missing" ]; then
+  echo "!! cannot run the suite - missing:$missing" >&2
+  echo >&2
+  case "$missing" in
+    *ffmpeg*|*ffprobe*)
+      echo "   ffmpeg and ffprobe are not pip-installable:" >&2
+      echo "     apt install ffmpeg     # or brew install ffmpeg" >&2
+      echo >&2 ;;
+  esac
+  case "$missing" in
+    *timeout*)
+      echo "   \`timeout\` is GNU coreutils. macOS does not ship it:" >&2
+      echo "     brew install coreutils" >&2
+      echo "     PATH=\"\$(brew --prefix coreutils)/libexec/gnubin:\$PATH\"   # exposes it as \`timeout\`" >&2
+      echo >&2 ;;
+  esac
+  case "$missing" in
+    *python*)
+      # Covers both a missing interpreter and a missing module. The interpreter case is
+      # the commonest and the least obvious: the suite calls `python`, and plenty of
+      # systems ship only `python3`.
+      command -v python >/dev/null 2>&1 || {
+        echo "   The suite calls \`python\`, not \`python3\`. If you only have python3:" >&2
+        echo "     ln -s \"\$(command -v python3)\" ~/.local/bin/python   # or use a venv" >&2
+        echo >&2
+      }
+      echo "   Python packages come from the core requirements:" >&2
+      echo "     python -m pip install -r requirements.txt" >&2
+      echo >&2
+      echo "   If this repo has a venv, activate it or run the suite through it:" >&2
+      echo "     PATH=\"$REPO/.venv/bin:\$PATH\" bash tests/run.sh" >&2
+      echo "   (a git worktree does NOT inherit the main checkout's .venv)" >&2 ;;
+  esac
+  exit 1
+fi
+
 echo "restoration pipeline tests"
 echo
 
@@ -84,6 +141,70 @@ PY
       assert_eq "timing: 60fps output covers the full source span (#3)" "no" "$SHORT"
     else
       bad "timing: finish.sh produced a 60fps output" "$(tail -1 "$W/finish.log")"
+    fi
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Luma stabilisation. This module runs in every render and had no assertion of any
+# kind - it was exercised end-to-end by the timing group, which would pass just as
+# happily if it were a no-op or if it made the flicker worse. What it does has an
+# objective definition (frame-to-frame mean luma should vary less afterwards), so it
+# belongs here; whether the result LOOKS better does not.
+# ---------------------------------------------------------------------------
+echo
+echo "luma stabilisation"
+
+if want stabilise; then
+  HUNT="$W/hunt.mp4"; STAB="$W/hunt_stab.mkv"
+  # Injected auto-exposure hunting: the whole frame's brightness oscillates, which is
+  # what the N90 did with nothing stable to meter on.
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=s=96x64:r=15:d=6" -frames:v 90 \
+    -vf "geq=lum='clip(lum(X,Y)+14*sin(N*1.1),0,255)':cb='cb(X,Y)':cr='cr(X,Y)'" \
+    -c:v libx264 -crf 18 -pix_fmt yuv420p "$HUNT"
+  python "$REPO/pipeline/luma_stabilise.py" "$HUNT" "$STAB" 31 1.0 >/dev/null 2>&1
+  STAB_RC=$?
+  # Separate from the checks below, and not implied by them. The writer releases the
+  # output file before its final reporting block, so a failure after that point leaves a
+  # complete, correct video whose frame count and flicker both pass - while the real
+  # pipeline, running under `set -euo pipefail`, aborts. A test that passes where
+  # production fails is worse than no test.
+  assert_eq "stabilise: exits 0" "0" "$STAB_RC"
+
+  if [ ! -f "$STAB" ]; then
+    bad "stabilise: produces an output" "no $STAB"
+  else
+    ok "stabilise: produces an output"
+    # Frame count first. A stabiliser that drops frames would shift every timestamp
+    # downstream, and this project has shipped a truncated render before.
+    assert_eq "stabilise: frame count is preserved" \
+      "$(frame_count "$HUNT")" "$(frame_count "$STAB")"
+
+    RES="$(python - "$HUNT" "$STAB" <<'PY'
+import sys
+import cv2, numpy as np
+def flicker(path):
+    cap = cv2.VideoCapture(path); m = []
+    while True:
+        ok, f = cap.read()
+        if not ok: break
+        m.append(cv2.cvtColor(f, cv2.COLOR_BGR2GRAY).mean())
+    cap.release()
+    if len(m) < 3: raise SystemExit("too few frames")
+    return float(np.std(np.diff(m)))
+b, a = flicker(sys.argv[1]), flicker(sys.argv[2])
+# Ratio, not absolute: the fixture's amplitude is arbitrary, the reduction is not.
+print(f"{b:.3f} {a:.3f} {(b / a if a else 999):.1f}")
+PY
+)"
+    BEFORE="${RES%% *}"; AFTER="$(echo "$RES" | cut -d" " -f2)"; RATIO="${RES##* }"
+    # Measured 16x on this fixture. 4x is a floor that a working stabiliser clears
+    # comfortably and a no-op (ratio 1.0) or an inverted correction cannot.
+    if python -c "import sys; sys.exit(0 if $RATIO >= 4.0 else 1)" 2>/dev/null; then
+      ok "stabilise: frame-to-frame luma flicker falls ($BEFORE -> $AFTER, ${RATIO}x)"
+    else
+      bad "stabilise: frame-to-frame luma flicker falls" \
+          "only ${RATIO}x reduction ($BEFORE -> $AFTER), expected at least 4x"
     fi
   fi
 fi

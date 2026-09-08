@@ -1,0 +1,74 @@
+# Run the regression suite on every pull request.
+#
+# Why this exists: the suite is the instrument every conclusion in this repository rests
+# on. docs/findings.md records several defects that a green suite had been hiding — tests
+# that asserted a key existed rather than its value, a fixture whose input and output were
+# byte-identical, defaults that no test ever executed. The standard the project holds
+# itself to is that a test which cannot fail is worse than none. That standard is worth
+# nothing if the suite only runs when someone remembers.
+#
+# What a green run does and does not mean. The stubbing is narrower than "everything":
+#
+#   Really executed  ffmpeg and ffprobe end to end through pipeline/finish.sh (concat,
+#                    grade, interpolation, trim), OpenCV in luma_stabilise.py and the
+#                    analysis tools, and every guard and argument check.
+#   Stubbed          the GPU layer only — nvidia-smi, the SeedVR2 inference call, and pip,
+#                    all faked by tests/cloud_pod.sh so the cloud runner's logic can be
+#                    driven without a card.
+#   Not covered      the environment a real render lands in. The stub pip is a no-op, so
+#                    it sailed past the PEP 668 failure that killed the first real pod run
+#                    before inference started. Fixtures are synthetic and tiny; nothing
+#                    here touches input/ or masters/.
+#
+# So a green run is real evidence about the pipeline's behaviour, not merely its wiring —
+# but it says nothing about a GPU, a model, or a machine this workflow has never seen.
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A second push to a PR makes the first run irrelevant. Cancel it rather than paying for
+# both and reading a stale result.
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15    # the suite finishes in seconds; this catches a hang, not slowness
+    steps:
+      - uses: actions/checkout@v4
+
+      # ffmpeg and ffprobe are not pip-installable and the suite is useless without them.
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+          ffmpeg -version | head -1
+          ffprobe -version | head -1
+
+      # 3.12 deliberately: requirements.txt records that 3.14 has no numpy or opencv wheels.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      # Core only. requirements-reframe.txt pulls in ultralytics (AGPL-3.0) for a path that
+      # is experimental and not exercised here — see NOTICE and CONTRIBUTING.md.
+      - name: Install core requirements
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Show what the suite is about to run against
+        run: |
+          python -c "import numpy, cv2; print('numpy', numpy.__version__); print('cv2', cv2.__version__)"
+
+      - name: Run the suite
+        run: bash tests/run.sh

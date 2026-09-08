@@ -331,6 +331,28 @@ echo
 echo "repository"
 
 if want repository; then
+
+  # An index that has to be maintained by hand goes stale the first time someone appends
+  # a section - which it did, within one PR of being added. Asserting it is the only way
+  # a docs convenience stays true; otherwise it quietly becomes a lie about the document
+  # it sits at the top of.
+  IDX="$(python - "$REPO" <<'PY'
+import pathlib, re, sys
+s = pathlib.Path(sys.argv[1] + "/docs/findings.md").read_text()
+if "## Contents" not in s:
+    print("bad: findings.md has no Contents index"); raise SystemExit
+block = s[s.index("## Contents"):s.index("## Pre-filters")]
+listed = set(re.findall(r"^- \[(.+?)\]", block, flags=re.M))
+heads = [h for h in re.findall(r"^## (.+)$", s, flags=re.M) if h != "Contents"]
+missing = [h for h in heads if h not in listed]
+extra = [h for h in listed if h not in heads]
+out = []
+if missing: out.append("not in the index: " + "; ".join(missing[:3]))
+if extra:   out.append("in the index but not the document: " + "; ".join(extra[:3]))
+print("ok" if not out else "bad: " + " | ".join(out))
+PY
+)"
+  assert_eq "repository: the findings index lists every section" "ok" "$IDX"
   # A directory exclusion cannot be undone by a ! negation, and this went unnoticed
   # through the whole founding PR — both READMEs were ignored and never committed.
   for f in masters/README.md experiments/README.md; do
@@ -452,6 +474,40 @@ print("ok" if not bad else "bad: " + "; ".join(bad))
 PY
 )"
   assert_eq "grade: the rails are exactly 254-255 and 0-1" "ok" "$RAILS"
+
+  # Percentiles must interpolate the way numpy does, not snap to a bin edge. Snapping is
+  # the obvious thing to do with a histogram and it is wrong: the two disagreed by up to
+  # 9 luma levels, enough to cross pick()'s `p99 >= 250` and silently change the preset.
+  # The fixture is the exact case that exposed it.
+  PCT="$(python - "$REPO" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1] + "/pipeline")
+import numpy as np, grade
+bad = []
+a = np.array([151] * 603 + [250] * 7, dtype=np.uint8)
+counts = np.bincount(a, minlength=256).astype(np.int64)
+got, want = grade._percentile(counts, int(counts.sum()), 99), float(np.percentile(a, 99))
+if abs(got - want) > 1e-6:
+    bad.append(f"p99 {got:.4f}, numpy says {want:.4f}")
+rng = np.random.default_rng(0)
+for _ in range(40):
+    v = rng.integers(0, 256, size=int(rng.integers(10, 900))).astype(np.uint8)
+    c = np.bincount(v, minlength=256).astype(np.int64)
+    for q in (1, 50, 99):
+        g, w = grade._percentile(c, int(c.sum()), q), float(np.percentile(v, q))
+        if abs(g - w) > 1e-6:
+            bad.append(f"p{q} {g:.4f} vs numpy {w:.4f}"); break
+print("ok" if not bad else "bad: " + "; ".join(bad[:3]))
+PY
+)"
+  assert_eq "grade: percentiles match numpy, not a bin edge" "ok" "$PCT"
+
+  # ffprobe failing must produce the written diagnostic, not a CalledProcessError
+  # traceback. The message existed before this test and was unreachable, because
+  # check=True raised first.
+  printf 'not a video\n' > "$W/gnotvideo.txt"
+  assert_stderr_matches "grade: a non-video is refused with a message, not a traceback" \
+    "could not read dimensions" python "$G" measure "$W/gnotvideo.txt"
 
   # A truncated render measures clean on whatever survived, and ffmpeg exits 0 after
   # dropping what it could not decode. CLAUDE.md records this trap for inference output;

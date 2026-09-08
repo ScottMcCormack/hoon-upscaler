@@ -7,7 +7,8 @@ clip, 352×288, 15fps VFR, mpeg4 at 509kbps.
 
 Roughly chronological within each group. Every entry records something that was
 tried and settled, so it is not tried again; `CONTRIBUTING.md` sets the standard for
-adding one.
+adding one. `tests/run.sh` asserts that this list covers every section, so appending
+one without listing it here fails the suite.
 
 **What the model needs**
 
@@ -26,6 +27,10 @@ adding one.
 - [Motion and timing](#motion-and-timing)
 - [Interpolation and stall handling — five things ruled out, 2026-09-03](#interpolation-and-stall-handling--five-things-ruled-out-2026-09-03)
 
+**Grading**
+
+- [The grade was clipping half the picture, 2026-09-06](#the-grade-was-clipping-half-the-picture-2026-09-06)
+
 **Renting a GPU**
 
 - [The cloud runner, first executed 2026-09-04](#the-cloud-runner-first-executed-2026-09-04)
@@ -40,6 +45,10 @@ adding one.
 - [The tests that guarded the manifest could not read it, 2026-09-06](#the-tests-that-guarded-the-manifest-could-not-read-it-2026-09-06)
 - [The fix for an asymmetry was itself asymmetric, 2026-09-07](#the-fix-for-an-asymmetry-was-itself-asymmetric-2026-09-07)
 - [Round three, part two: the same fix missing from a fourth file, twice](#round-three-part-two-the-same-fix-missing-from-a-fourth-file-twice)
+- [Copilot on the grade: two real defects and one half-right, 2026-09-07](#copilot-on-the-grade-two-real-defects-and-one-half-right-2026-09-07)
+- [Two adversarial reviews of the grade change, 2026-09-07](#two-adversarial-reviews-of-the-grade-change-2026-09-07)
+- [Failing loudly is not the same as failing safely, 2026-09-08](#failing-loudly-is-not-the-same-as-failing-safely-2026-09-08)
+- [Reviewing my own work found what the reviewers had already fixed, 2026-09-08](#reviewing-my-own-work-found-what-the-reviewers-had-already-fixed-2026-09-08)
 
 ## Pre-filters — roughly twenty variants, all unnecessary in the end
 
@@ -827,3 +836,37 @@ was already there.
 The pattern across all three: each was introduced *by* a fix from the previous review round.
 New code written in response to review is not reviewed code, and this is now the second time
 that has been the round's main lesson.
+
+## Reviewing my own work found what the reviewers had already fixed, 2026-09-08
+
+After rebasing onto the CI branch, a systematic mutation sweep of the grading code -
+ten mutations, one per behaviour the tests claim to protect - found **two survivors**, and
+both were fixes made in response to earlier review that were never pinned by a test.
+
+```
+clipped rail 254 -> 255            caught
+crushed rail :2 -> :1              caught
+verify samples instead of scans    caught
+UNREVIEWED gate disabled           caught
+frame_count recounts packets       caught
+TOLERANCE 0.005 -> 1.0             caught
+deliverable moved before verify    caught
+explicit GRADE discarded           caught
+dims check=True restored           SURVIVED
+percentile snaps to a bin edge     SURVIVED
+```
+
+Both survivors were behaviours a reviewer had asked for and I had implemented correctly.
+Correct code with no test is a fix with a half-life: the next person to touch it has
+nothing telling them the behaviour was deliberate. **Fixing a review finding is not
+finished until a mutation of the fix fails something.**
+
+**The index went stale within one PR of being added.** `docs/findings.md` gained a Contents
+index; the very next branch appended four sections and the index knew about none of them. A
+hand-maintained list of the document it sits inside will always drift, so it is now asserted:
+the suite fails if a section is missing from the index, or if the index names a section that
+does not exist. Mutation-verified both ways.
+
+That is the general shape worth keeping. A documentation convenience that cannot be checked
+becomes, with time, a confident statement that is wrong - which is the same failure as an
+unverified measurement, wearing different clothes.

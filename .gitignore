@@ -59,3 +59,10 @@ experiments/*
 
 # --- claude code: agent worktrees are transient ---
 .claude/worktrees/
+
+# --- cloud run scratch ---
+# Renders and their manifests land beside the runner. Per-run local records, like
+# masters/, not repository content. sr_test_720.json was committed here by a `git add -A`
+# that swept up the output of a pod test run.
+cloud/sr_*.json
+cloud/.pod_id

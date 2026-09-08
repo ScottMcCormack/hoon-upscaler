@@ -1,5 +1,7 @@
 # hoon-upscaler
 
+[![tests](https://github.com/ScottMcCormack/hoon-upscaler/actions/workflows/tests.yml/badge.svg)](https://github.com/ScottMcCormack/hoon-upscaler/actions/workflows/tests.yml)
+
 AI restoration pipeline for degraded handheld video — stabilisation, SeedVR2 upscaling,
 frame-timing repair and selective interpolation.
 

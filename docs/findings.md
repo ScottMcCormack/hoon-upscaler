@@ -7,7 +7,8 @@ clip, 352×288, 15fps VFR, mpeg4 at 509kbps.
 
 Roughly chronological within each group. Every entry records something that was
 tried and settled, so it is not tried again; `CONTRIBUTING.md` sets the standard for
-adding one.
+adding one. `tests/run.sh` asserts that this list covers every section, so appending
+one without listing it here fails the suite.
 
 **What the model needs**
 
@@ -26,6 +27,10 @@ adding one.
 - [Motion and timing](#motion-and-timing)
 - [Interpolation and stall handling — five things ruled out, 2026-09-03](#interpolation-and-stall-handling--five-things-ruled-out-2026-09-03)
 
+**Grading**
+
+- [The grade was clipping half the picture, 2026-09-06](#the-grade-was-clipping-half-the-picture-2026-09-06)
+
 **Renting a GPU**
 
 - [The cloud runner, first executed 2026-09-04](#the-cloud-runner-first-executed-2026-09-04)
@@ -40,6 +45,11 @@ adding one.
 - [The tests that guarded the manifest could not read it, 2026-09-06](#the-tests-that-guarded-the-manifest-could-not-read-it-2026-09-06)
 - [The fix for an asymmetry was itself asymmetric, 2026-09-07](#the-fix-for-an-asymmetry-was-itself-asymmetric-2026-09-07)
 - [Round three, part two: the same fix missing from a fourth file, twice](#round-three-part-two-the-same-fix-missing-from-a-fourth-file-twice)
+- [Copilot on the grade: two real defects and one half-right, 2026-09-07](#copilot-on-the-grade-two-real-defects-and-one-half-right-2026-09-07)
+- [Two adversarial reviews of the grade change, 2026-09-07](#two-adversarial-reviews-of-the-grade-change-2026-09-07)
+- [Failing loudly is not the same as failing safely, 2026-09-08](#failing-loudly-is-not-the-same-as-failing-safely-2026-09-08)
+- [Scanning every frame did not close the hole it was supposed to, 2026-09-08](#scanning-every-frame-did-not-close-the-hole-it-was-supposed-to-2026-09-08)
+- [Reviewing my own work found what the reviewers had already fixed, 2026-09-08](#reviewing-my-own-work-found-what-the-reviewers-had-already-fixed-2026-09-08)
 
 ## Pre-filters — roughly twenty variants, all unnecessary in the end
 
@@ -615,3 +625,310 @@ output from the same `testsrc2` at the same settings as the input, so the two fi
 byte-identical, and a bug recording the input's hash for the output would have been
 invisible. The stub now emits a different pattern at a different size, which is also what a
 real upscale does.
+
+## The grade was clipping half the picture, 2026-09-06
+
+`finish.sh` hardcoded `eq=contrast=1.20:saturation=1.28:gamma=0.96`. `eq`'s contrast
+expands around a **fixed pivot of 128**, so what it does to a clip depends entirely on
+where that clip's content sits relative to 128 — which nothing was checking.
+
+```
+                     mean Y    clipped to white    crushed to black
+N90 night clip        139.6          1.7%                3.5%
+MVI_0081 graded       214.1         51.8%                0.02%
+MVI_0081 ungraded     208.1          1.8%                0.00%
+```
+
+**51.8% is not a look, it is deletion.** The tarmac sits at 230-245; the transfer function
+maps everything above ~236 to 255, so every difference within that band becomes the same
+white. It was spotted by eye first — "it looks like the car is on a white plane" — and the
+measurement only confirmed what the eye had already found.
+
+The N90 clip has the same bug at the other rail. Its 3.5% crushed black was visible during
+development and read as acceptable because the subject was a white car against dark tarmac.
+It is the same defect, quieter.
+
+### Turning the constant down does not work
+
+The obvious fix is a gentler contrast. Measured on MVI_0081:
+
+```
+contrast=1.20   51.8% clipped
+contrast=1.06   39.4% clipped
+```
+
+A 6% expansion still destroys a third of the frame, because at mean 208 the content is
+already within ~20 units of the ceiling. **There is no safe value of `eq=contrast` for this
+footage** — the pivot is wrong, not the gain. That is what sent the fix to `curves`.
+
+### What replaced it
+
+`pipeline/grade.py` measures the clip and picks among three fixed presets, and `finish.sh`
+then verifies the result. `GRADE` still overrides, and an explicit `GRADE` is verified too.
+
+The verification is the load-bearing part: it compares clipped and crushed fractions
+against the *ungraded* render of the same clip and fails if grading made either materially
+worse. A blown source is the camera's doing and is allowed; a grade that adds clipping is
+not. That check rejects the old grade outright, which is the property worth having.
+
+### The automatic curve that was tried and abandoned
+
+The first three attempts synthesised a curve per clip from its own percentiles rather than
+selecting a preset. Each was tuned to land closer to a curve already approved by eye, and
+each stayed measurably worse than it:
+
+```
+                            tarmac stdev (local contrast, higher = more detail)
+ungraded                              39.22
+synthesised, linear ramp              32.95
+synthesised, squared ramp             32.95
+synthesised, two-anchor p50/p99       36.78
+hand-tuned, approved by eye           39.03
+old grade                             44.43   <- but 51.8% clipped, so this is
+                                                 the variance of a half-white frame
+```
+
+Three iterations of an automatic thing chasing a target only an eye can call is the shape
+of the six failed perceptual metrics above. So the curves are fixed rather than
+synthesised, only the *choice* between them is automatic, and only clipping — which has an
+objective definition — is asserted anywhere.
+
+Fixed is not the same as approved, and the distinction is enforced rather than described: a
+curve becomes auto-selectable only after it has been checked by eye, and until then it sits
+in `UNREVIEWED` and the picker falls back to `neutral`. `dark` is in that state today — see
+the later section on this. An earlier version of this paragraph said the curves were
+"fixed and eye-checked", which was true when written and became false in the same PR that
+introduced the gate.
+
+Note the last row: the old grade scores *highest* on local contrast. Any metric rewarding
+contrast would have preferred it. That is the same trap as the speckle metric that
+correlated with sharpness at r = 0.88.
+
+## Copilot on the grade: two real defects and one half-right, 2026-09-07
+
+**A sampled guard cannot assert what it does not look at.** `verify` compared ungraded
+against graded using every 20th frame, so damage confined to a shorter run passed unseen.
+Demonstrated: a 40-frame clip with frames 1-9 blown to white measures **0.00% clipped at a
+stride of 20 and 22.50% scanning every frame** - the sampled check called a clip a fifth
+destroyed "verified".
+
+Sampling is now a speed knob for *choosing* a preset only. The guard scans every frame,
+which it can afford because the statistics come from a streamed 256-bin histogram rather
+than a buffered array: constant PIXEL memory, one frame at a time. (A later round added
+per-frame rail statistics, which are linear but tiny - see the section on the averaging
+gap below; this paragraph originally said "constant memory regardless of clip length" and
+that stopped being true.) Buffering every frame of a 1480-frame 1080p render would be
+~3GB on a machine whose notes already record the OOM killer taking processes out. uint8 has 256 possible values, so mean and percentiles from
+the histogram are exact, not approximations.
+
+**A test that proved only that a message was printed.** `GRADE="eq=saturation=1.0"` is an
+identity filter, and the assertion matched a line emitted *before* ffmpeg ran. Mutation-
+proved: making `finish.sh` announce "grade: explicit" and then silently discard the
+override left the test passing. It now uses `saturation=0`, requires exit 0, and reads
+`signalstats.SATAVG` back out of the render - measuring the effect rather than the
+announcement.
+
+**Copilot was half right here, and the half it got wrong matters.** It claimed the same
+flaw applied to the adjacent `contrast=4.0` case. It does not: that filter is not an
+identity, and the same mutation *fails* it, because the assertion depends on the grade
+having been applied and then measured. Reviewing the claim by mutation rather than by
+agreement is what separated the two.
+
+**An unreviewed preset was auto-selectable.** The `dark` curve carried a comment saying it
+had not been checked by eye, in a module whose docstring says every curve was. The
+measurement could select it, and an unapproved look would be baked into a master silently.
+It is now in `UNREVIEWED`: `pick` still reports it as the measurement's honest answer, but
+the CLI falls back to `neutral` and says so on stderr unless `GRADE_ALLOW_UNREVIEWED=1`.
+Neutral is safe rather than good - it shapes the middle and leaves the rails alone.
+
+No footage in the project currently reaches it: `full_169.mp4` and `test_15s.mp4` measure
+neutral, `mvi0081_full.mp4` measures bright. So this closed a latent trap rather than a
+live one - worth saying, because "we would have noticed" was the reasoning that let the
+fixed grade clip 51.8% of a daylight clip in the first place.
+
+## Two adversarial reviews of the grade change, 2026-09-07
+
+Correctness and simplicity, reviewed separately. Both earned their keep, and the most
+useful result was a rejected suggestion.
+
+**A truncated file measured clean and passed the guard.** ffmpeg exits **0** after dropping
+frames it cannot decode, so a file cut by 600 bytes decoded 25 of its 60 frames, reported
+`clipped 0.000%`, and passed `verify` — on a render that is 50% blown white. `CLAUDE.md`
+already records this exact trap for inference output; the grade guard had no equivalent.
+
+The fix needed a second correction. Comparing decoded frames against `-count_packets`
+catches nothing: a truncated file *recounts* to whatever survived, so the reference agreed
+with the damage. `nb_frames` comes from the header and survives truncation — 60 declared
+against 25 recounted. **A cross-check is only as good as its reference, which is this
+project's recurring error wearing another hat.**
+
+**A two-pipe deadlock.** `histogram` drained stdout in a blocking loop and read stderr only
+afterwards. On a densely corrupted file ffmpeg wrote 128KB of decode errors, filled the
+stderr pipe, and blocked; the loop waited for stdout that could never arrive. Reproduced,
+hung until killed. stderr now goes to a temp file, never a pipe.
+
+**Snapping a percentile to a bin edge is not the same as interpolating one.** `np.percentile`
+interpolates between order statistics; `searchsorted` on a cumulative histogram does not,
+and the two disagreed by up to 9 luma levels. It reached a decision: 603 pixels at 151 and
+7 at 250 give **p99 = 241.09 interpolated and 250.00 snapped**, which crosses `pick`'s
+`p99 >= 250` and silently changes the preset. Now reproduces numpy to 9e-16 across 2000
+random arrays. `verify` never touches percentiles, so the guard was never affected — worth
+stating, because "it's in the measurement code" is not the same as "it's in the guard".
+
+**Sampling barely sampled.** `select` without `-fps_mode passthrough` lets ffmpeg's default
+sync duplicate frames back up to a constant rate, so `every=20` decoded ~70% of the clip
+rather than 5%. The comments calling it a speed knob were describing an intention. Now
+`every=20` on a 60-frame clip decodes 3 frames.
+
+**The rails had no test.** `counts[254:]` -> `counts[255:]` and `counts[:2]` -> `counts[:1]`
+both passed the entire suite. `pick` and `verify` only need gross classification, so nothing
+pinned where the rail actually starts. `summarise(counts)` is now separate from `stats(path)`
+so the boundary can be asserted without an encoder in the way.
+
+### The rejected suggestion is the most valuable result
+
+The simplicity review was asked whether ffmpeg's own `signalstats` could replace the numpy
+histogram entirely. It built that version and found it computes **silently wrong numbers**:
+
+```
+                numpy    signalstats mask
+bright         67.19%          12.85%
+dark          100.00%          51.17%
+gap_graded     22.50%          22.50%   <- agrees, misleadingly
+```
+
+Feeding a constant through `lutyuv` emits **214 for a requested 200** — `(200-16)*255/219`
+— a limited-to-full range rescale inside the filter graph that a plain `format=gray` decode
+does not apply. The two fixtures that agreed did so only because their damage sits exactly
+on the 0/255 rails, which a range rescale leaves fixed. **A partial agreement on the cases
+you happen to test is the most dangerous result available**, and it is the mismatched-baseline
+error again, this time hiding inside ffmpeg's colorspace negotiation.
+
+### What was simplified
+
+Reading `frame_bytes * 8` per iteration measured *slower* than one frame at a time (1.60s
+against 1.38s on 200 frames at 1080p) — a guessed constant that cost performance and
+clarity. And `finish.sh` called `grade.py pick` twice for the same clip, once for the filter
+and once for the name, decoding the whole render each time; `--both` makes it one call.
+
+The memory justification held up under measurement rather than assertion: 622MB for 300
+frames at 1080p, extrapolating to 3.07GB for the real clip, against ~2KB of bins.
+
+## Failing loudly is not the same as failing safely, 2026-09-08
+
+A second Copilot review on the grading PR, after the first round's fixes. Three findings,
+all correct, all verified by execution before being accepted.
+
+**The deliverable was written before it was checked.** `finish.sh` encoded the graded render
+straight to `OUT_DIR` and ran the clipping guard afterwards. `set -e` stops the pipeline on a
+refusal, which felt sufficient - but by then the destroyed file is sitting where a
+deliverable belongs, and it has already overwritten the previous good render. Both encodes
+now go to the work directory and are moved into place only after the guard passes.
+
+The distinction is worth naming: **failing loudly is not the same as failing safely.** This
+project has already shipped one plausible-looking bad file - a truncated render that only
+its duration gave away - so a bad artifact in the output directory is exactly the failure
+mode that survives an error message nobody scrolls back to read.
+
+**A friendly diagnostic that could never run.** `dims()` called ffprobe with `check=True`,
+which raises `CalledProcessError` before the "missing, unreadable, or not a video" message
+below it. On the commonest bad input - a path that is not a video - it produced a traceback.
+Dead code written in the same commit as the check it defeats, which is the third instance of
+that shape in this branch after the `timeout` 137 branch and the mode/resolution guard pair.
+
+**A relative import three lines from a correct one.** The new rails test did
+`sys.path.insert(0, "pipeline")`, rooted at the caller's working directory, while the
+existing snippet in the same file passes `"$REPO"` in for exactly this reason. Running
+`bash /path/to/tests/run.sh grade` from anywhere else failed to import `grade`. Confirmed by
+running the suite from `/tmp` - 11 passed, 1 failed - and fixed by copying the pattern that
+was already there.
+
+The pattern across all three: each was introduced *by* a fix from the previous review round.
+New code written in response to review is not reviewed code, and this is now the second time
+that has been the round's main lesson.
+
+## Reviewing my own work found what the reviewers had already fixed, 2026-09-08
+
+After rebasing onto the CI branch, a systematic mutation sweep of the grading code -
+ten mutations, one per behaviour the tests claim to protect - found **two survivors**, and
+both were fixes made in response to earlier review that were never pinned by a test.
+
+```
+clipped rail 254 -> 255            caught
+crushed rail :2 -> :1              caught
+verify samples instead of scans    caught
+UNREVIEWED gate disabled           caught
+frame_count recounts packets       caught
+TOLERANCE 0.005 -> 1.0             caught
+deliverable moved before verify    caught
+explicit GRADE discarded           caught
+dims check=True restored           SURVIVED
+percentile snaps to a bin edge     SURVIVED
+```
+
+Both survivors were behaviours a reviewer had asked for and I had implemented correctly.
+Correct code with no test is a fix with a half-life: the next person to touch it has
+nothing telling them the behaviour was deliberate. **Fixing a review finding is not
+finished until a mutation of the fix fails something.**
+
+**The index went stale within one PR of being added.** `docs/findings.md` gained a Contents
+index; the very next branch appended four sections and the index knew about none of them. A
+hand-maintained list of the document it sits inside will always drift, so it is now asserted:
+the suite fails if a section is missing from the index, or if the index names a section that
+does not exist. Mutation-verified both ways.
+
+That is the general shape worth keeping. A documentation convenience that cannot be checked
+becomes, with time, a confident statement that is wrong - which is the same failure as an
+unverified measurement, wearing different clothes.
+
+## Scanning every frame did not close the hole it was supposed to, 2026-09-08
+
+The guard was changed to scan every frame after a review found that a stride of 20 stepped
+over a nine-frame burst. That fixed the sampling gap and left a second one untouched, which
+the next review round found: **the clip-wide figure is an average, and averages dilute short
+runs to nothing.**
+
+Demonstrated on the real shape of this project's footage - 1480 frames, seven of them fully
+blown to white:
+
+```
+ungraded  clipped 0.000%
+graded    clipped 0.473%      <- under the 0.5 point tolerance, so: verified
+```
+
+Seven frames with no picture left in them, passed as acceptable. The earlier regression test
+only caught its own case because the fixture was 40 frames long, where nine destroyed frames
+are 22.5% of the clip. At real length the same damage is 0.473%.
+
+The fix keeps per-frame rail fractions rather than only the total, and rejects a material
+rise on **any single frame** as well as across the clip.
+
+That changes the memory story, so state it precisely rather than repeating the old
+headline. **Pixel** memory is still constant - one frame decoded, counted, discarded. The
+per-frame statistics are linear: ~113 bytes a frame, measured at 167KB for 1480 frames,
+against the 3.07GB that buffering the pixels would cost. The linear part is roughly
+18,000x smaller than the part that was removed, which is why it is worth paying; but
+"constant memory regardless of clip length" was the claim before rails existed and is no
+longer true as written. The threshold came from measurement,
+not from choosing a round number:
+
+```
+                                  max single-frame rise in clipping
+chosen 'bright' preset                          -0.70 points   (improves every frame)
+old fixed grade                                +70.42 points
+```
+
+A legitimate preset never raises any frame's clipping at all, so two points sits far above
+the honest case and far below the destructive one.
+
+**A second finding in the same round: `verify` compared renders without checking they were
+comparable.** Each file's decode is cross-checked against its own header, which says nothing
+about the pair. A graded encode that is legitimately shorter - an explicit `GRADE` carrying a
+`trim` - passes its own check and is then scored frame-for-frame against a longer ungraded
+render, with the later `tpad` step turning the missing tail into held frames. Geometry and
+length must match before percentages mean anything.
+
+The lesson is not about grading. **A fix aimed at one hole should be checked against the
+class of hole, not the instance reported.** "Scan everything" answered the sampling gap and
+read like a general answer, which is why the averaging gap survived it - and why the
+write-up claimed a completeness the code did not have.

@@ -89,6 +89,11 @@ computed where the effect should not appear — catches most of it.
 - **Disable rotation in stabilisation** (`maxangle=0`). Handheld shake is nearly all
   translation; rotation fitting chases noise and produces a swimming picture.
 - **No `unsharp` in the grade.** It rings on high-contrast lettering.
+- **Never grade with a fixed contrast pivot.** `eq=contrast` expands around 128, so its
+  effect depends on where the clip sits. The one hardcoded grade clipped 51.8% of a
+  daylight clip to white and crushed 3.5% of a night clip to black. Turning it down does
+  not help — `contrast=1.06` still clipped 39.4%. `pipeline/grade.py` picks a preset from
+  the clip and `finish.sh` verifies the result against the ungraded render.
 
 ## Hardware notes
 

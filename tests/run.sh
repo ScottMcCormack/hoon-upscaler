@@ -331,6 +331,28 @@ echo
 echo "repository"
 
 if want repository; then
+
+  # An index that has to be maintained by hand goes stale the first time someone appends
+  # a section - which it did, within one PR of being added. Asserting it is the only way
+  # a docs convenience stays true; otherwise it quietly becomes a lie about the document
+  # it sits at the top of.
+  IDX="$(python - "$REPO" <<'PY'
+import pathlib, re, sys
+s = pathlib.Path(sys.argv[1] + "/docs/findings.md").read_text()
+if "## Contents" not in s:
+    print("bad: findings.md has no Contents index"); raise SystemExit
+block = s[s.index("## Contents"):s.index("## Pre-filters")]
+listed = set(re.findall(r"^- \[(.+?)\]", block, flags=re.M))
+heads = [h for h in re.findall(r"^## (.+)$", s, flags=re.M) if h != "Contents"]
+missing = [h for h in heads if h not in listed]
+extra = [h for h in listed if h not in heads]
+out = []
+if missing: out.append("not in the index: " + "; ".join(missing[:3]))
+if extra:   out.append("in the index but not the document: " + "; ".join(extra[:3]))
+print("ok" if not out else "bad: " + " | ".join(out))
+PY
+)"
+  assert_eq "repository: the findings index lists every section" "ok" "$IDX"
   # A directory exclusion cannot be undone by a ! negation, and this went unnoticed
   # through the whole founding PR — both READMEs were ignored and never committed.
   for f in masters/README.md experiments/README.md; do
@@ -363,6 +385,243 @@ if want repository; then
       bad "repository: $f stays ignored" "media would be committable"
     fi
   done
+fi
+
+# ---------------------------------------------------------------------------
+# Grading. The old fixed grade clipped 51.8% of a bright clip to white and crushed
+# 3.5% of a dark one to black, because eq's contrast pivot is fixed at 128 and the
+# footage is not. Only clipping is asserted here - it has an objective definition.
+# Whether a grade LOOKS right stays an eye call, per the header of this file.
+# ---------------------------------------------------------------------------
+echo
+echo "grading"
+
+if want grade; then
+  G="$REPO/pipeline/grade.py"
+  # A bright clip pinned to white, a dark one pinned to black, and one that is neither.
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "color=c=white:s=64x36:r=15:d=2" \
+    -vf "geq=lum='240+15*sin(X/3)':cb=128:cr=128" -frames:v 30 -pix_fmt yuv420p "$W/bright.mp4"
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "color=c=black:s=64x36:r=15:d=2" \
+    -vf "geq=lum='max(0,8*sin(X/3))':cb=128:cr=128" -frames:v 30 -pix_fmt yuv420p "$W/dark.mp4"
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "color=c=gray:s=64x36:r=15:d=2" \
+    -frames:v 30 -pix_fmt yuv420p "$W/mid.mp4"
+
+  assert_eq "grade: a clip pinned to white picks the bright preset" \
+    "bright" "$(python "$G" pick "$W/bright.mp4" --name 2>/dev/null)"
+  # The opt-in is needed because 'dark' is unreviewed and no longer auto-selected. What
+  # is asserted here is the MEASUREMENT - black footage measures as needing the dark
+  # curve - which stays true and testable independently of whether it is approved to run.
+  assert_eq "grade: a clip pinned to black measures as needing the dark preset" \
+    "dark" "$(GRADE_ALLOW_UNREVIEWED=1 python "$G" pick "$W/dark.mp4" --name 2>/dev/null)"
+  assert_eq "grade: a clip on neither rail picks neutral" \
+    "neutral" "$(python "$G" pick "$W/mid.mp4" --name 2>/dev/null)"
+
+  # The guard is the point of the whole change: it must reject the grade that shipped.
+  ffmpeg -hide_banner -loglevel error -y -i "$W/bright.mp4" \
+    -vf "eq=contrast=1.20:saturation=1.28:gamma=0.96" -pix_fmt yuv420p "$W/bad.mp4"
+  assert_stderr_matches "grade: the guard rejects a grade that clips" "destroying picture" \
+    python "$G" verify "$W/bright.mp4" "$W/bad.mp4"
+
+  ffmpeg -hide_banner -loglevel error -y -i "$W/bright.mp4" \
+    -vf "$(python "$G" pick "$W/bright.mp4")" -pix_fmt yuv420p "$W/good.mp4"
+  if python "$G" verify "$W/bright.mp4" "$W/good.mp4" >/dev/null 2>&1
+  then ok "grade: the guard passes the chosen preset"
+  else bad "grade: the guard passes the chosen preset" "chosen preset failed its own check"; fi
+
+  # An explicit GRADE must win over the derived one...
+  SRC="$W/gsrc.mp4"; RAW="$W/graw.mp4"; GOUT="$W/gout"; mkdir -p "$GOUT"
+  mk_vfr_source "$SRC" 40 5 8
+  mk_upscaled "$RAW" "$(frame_count "$SRC")"
+  # Capture, then match. Piping into `grep -q` looks equivalent and is not: grep exits
+  # on the first match, finish.sh takes SIGPIPE, and `pipefail` reports the pipeline as
+  # failed even though the assertion held.
+  # saturation=0, not saturation=1.0. The identity filter this used to pass proved only
+  # that finish.sh PRINTED "grade: explicit" before ffmpeg ran - a mutation that announced
+  # the override and then silently discarded it passed the test. The effect has to be
+  # measurable in the render, and the run has to succeed.
+  out="$(GRADE="eq=saturation=0" bash "$REPO/pipeline/finish.sh" "$RAW" G "$SRC" "$GOUT" 2>&1)"; st=$?
+  GRADED="$GOUT/G_lumafix_14fps.mp4"
+  if [ "$st" -ne 0 ]; then
+    bad "grade: finish.sh honours an explicit GRADE" "exit $st: $(printf '%s' "$out" | tail -1)"
+  elif [ ! -f "$GRADED" ]; then
+    bad "grade: finish.sh honours an explicit GRADE" "no $GRADED"
+  else
+    # SATAVG collapses to ~1 when saturation is zeroed, and sits well above it otherwise.
+    SAT="$(ffprobe -v error -f lavfi "movie=$GRADED,signalstats" \
+            -show_entries frame_tags=lavfi.signalstats.SATAVG -of csv=p=0 2>/dev/null \
+            | head -1 | tr -d ',')"      # csv=p=0 still emits a trailing comma
+    if [ -n "$SAT" ] && python -c "import sys; sys.exit(0 if float('$SAT') < 5 else 1)" 2>/dev/null; then
+      ok "grade: finish.sh honours an explicit GRADE (SATAVG $SAT)"
+    else
+      bad "grade: finish.sh honours an explicit GRADE" "GRADE was announced but not applied (SATAVG ${SAT:-unreadable}, expected < 5)"
+    fi
+  fi
+
+  # The rail boundaries themselves. Both off-by-ones (254->255, 1->0) passed every other
+  # test in this group, because pick() and verify() only need gross classification and
+  # never care exactly where the rail starts.
+  RAILS="$(python - "$REPO" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1] + "/pipeline")
+import numpy as np, grade
+bad = []
+for lv, want_c, want_x in ((0,0,1), (1,0,1), (2,0,0), (253,0,0), (254,1,0), (255,1,0)):
+    c = np.zeros(256, dtype=np.int64); c[lv] = 1000
+    st = grade.summarise(c)
+    if round(st["clipped"]) != want_c: bad.append(f"luma {lv}: clipped {st['clipped']}")
+    if round(st["crushed"]) != want_x: bad.append(f"luma {lv}: crushed {st['crushed']}")
+print("ok" if not bad else "bad: " + "; ".join(bad))
+PY
+)"
+  assert_eq "grade: the rails are exactly 254-255 and 0-1" "ok" "$RAILS"
+
+  # Percentiles must interpolate the way numpy does, not snap to a bin edge. Snapping is
+  # the obvious thing to do with a histogram and it is wrong: the two disagreed by up to
+  # 9 luma levels, enough to cross pick()'s `p99 >= 250` and silently change the preset.
+  # The fixture is the exact case that exposed it.
+  PCT="$(python - "$REPO" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1] + "/pipeline")
+import numpy as np, grade
+bad = []
+a = np.array([151] * 603 + [250] * 7, dtype=np.uint8)
+counts = np.bincount(a, minlength=256).astype(np.int64)
+got, want = grade._percentile(counts, int(counts.sum()), 99), float(np.percentile(a, 99))
+if abs(got - want) > 1e-6:
+    bad.append(f"p99 {got:.4f}, numpy says {want:.4f}")
+rng = np.random.default_rng(0)
+for _ in range(40):
+    v = rng.integers(0, 256, size=int(rng.integers(10, 900))).astype(np.uint8)
+    c = np.bincount(v, minlength=256).astype(np.int64)
+    for q in (1, 50, 99):
+        g, w = grade._percentile(c, int(c.sum()), q), float(np.percentile(v, q))
+        if abs(g - w) > 1e-6:
+            bad.append(f"p{q} {g:.4f} vs numpy {w:.4f}"); break
+print("ok" if not bad else "bad: " + "; ".join(bad[:3]))
+PY
+)"
+  assert_eq "grade: percentiles match numpy, not a bin edge" "ok" "$PCT"
+
+  # A clip-wide average dilutes a short destroyed run to nothing. Seven fully clipped
+  # frames in 1480 raise the whole-clip figure by 0.473 points, under the 0.5 tolerance,
+  # while being seven frames with no picture left in them. Scanning every frame fixed the
+  # SAMPLING gap and not this one; they are different holes.
+  LUNG="$W/glong_ung.mp4"; LGRD="$W/glong_grd.mp4"
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "color=c=gray:s=64x36:r=15:d=99" -frames:v 1480 \
+    -vf "geq=lum='128':cb=128:cr=128" -c:v libx264 -qp 0 -pix_fmt yuv420p "$LUNG"
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "color=c=gray:s=64x36:r=15:d=99" -frames:v 1480 \
+    -vf "geq=lum='if(between(N,700,706),255,128)':cb=128:cr=128" -c:v libx264 -qp 0 -pix_fmt yuv420p "$LGRD"
+  assert_stderr_matches "grade: a short destroyed run is caught despite the clip-wide average" \
+    "frame 700" python "$G" verify "$LUNG" "$LGRD"
+
+  # Renders of different length or geometry are not comparable, and percentages computed
+  # across different footage are not evidence. An explicit GRADE carrying a `trim` would
+  # otherwise be scored against a longer ungraded render.
+  SHORTG="$W/gshort.mp4"
+  ffmpeg -hide_banner -loglevel error -y -i "$LGRD" -frames:v 40 -c:v libx264 -qp 0 -pix_fmt yuv420p "$SHORTG"
+  assert_stderr_matches "grade: renders of different length are refused, not compared" \
+    "cannot compare" python "$G" verify "$LUNG" "$SHORTG"
+
+  # A VFR clip must measure the frames it has, not the frames ffmpeg pads it to. Without
+  # -fps_mode passthrough the default sync duplicates frames to force a constant rate —
+  # rawvideo carries no timestamps to prevent it — so a 59-frame clip decoded 61. That
+  # both rejected a good file and weighted the histogram by ffmpeg's padding. The source
+  # this project exists for is VFR, so this is the normal case here.
+  mk_vfr_source "$W/gvfr.mp4" 40 5 8
+  VFRN="$(python - "$REPO" "$W/gvfr.mp4" <<'PY'
+import subprocess, sys
+sys.path.insert(0, sys.argv[1] + "/pipeline")
+import grade
+declared = grade.frame_count(sys.argv[2])
+_, decoded, _ = grade.histogram(sys.argv[2], 1)
+print(f"{declared} {decoded}")
+PY
+)"
+  # Compare against the DECLARED count, not against the other half of the same string.
+  # The first version of this asserted "${VFRN%% *}" = "${VFRN##* }", and when the helper
+  # died both halves were the empty string and the test passed — a mutation removing
+  # passthrough left it green while breaking five other tests. A test whose two sides can
+  # both be empty is not comparing anything.
+  case "$VFRN" in
+    [0-9]*" "[0-9]*)
+      assert_eq "grade: a VFR clip measures its own frames, not ffmpeg's padding" \
+        "${VFRN%% *}" "${VFRN##* }" ;;
+    *)
+      bad "grade: a VFR clip measures its own frames, not ffmpeg's padding" \
+          "measurement failed: ${VFRN:-<no output>}" ;;
+  esac
+
+  # ffprobe failing must produce the written diagnostic, not a CalledProcessError
+  # traceback. The message existed before this test and was unreachable, because
+  # check=True raised first.
+  printf 'not a video\n' > "$W/gnotvideo.txt"
+  assert_stderr_matches "grade: a non-video is refused with a message, not a traceback" \
+    "could not read dimensions" python "$G" measure "$W/gnotvideo.txt"
+
+  # A truncated render measures clean on whatever survived, and ffmpeg exits 0 after
+  # dropping what it could not decode. CLAUDE.md records this trap for inference output;
+  # the guard needs it too, or it reports "verified" on half a clip.
+  TRU="$W/gtrunc.mp4"
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "color=c=gray:s=64x36:r=15:d=4" -frames:v 60 \
+    -vf "geq=lum='if(gte(N,30),255,128)':cb=128:cr=128" -movflags +faststart \
+    -c:v libx264 -qp 0 -pix_fmt yuv420p "$TRU"
+  truncate -s -600 "$TRU"
+  assert_stderr_matches "grade: a truncated file is refused, not measured" "decoded" \
+    python "$G" measure "$TRU"
+
+  # An unreviewed preset must not be chosen for you. pick() still reports 'dark' as the
+  # measurement's answer - that is a fact about the footage - but the CLI that finish.sh
+  # calls refuses to hand back an unapproved look without an explicit opt-in.
+  DARKSRC="$W/gdark.mp4"
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "color=c=black:s=64x36:r=15:d=2" \
+    -frames:v 20 -c:v libx264 -crf 20 -pix_fmt yuv420p "$DARKSRC"
+  out="$(python "$G" pick "$DARKSRC" --name 2>&1)"
+  case "$out" in
+    *"not been checked by eye"*neutral) ok "grade: an unreviewed preset is not auto-selected" ;;
+    *) bad "grade: an unreviewed preset is not auto-selected" "got: $(printf '%s' "$out" | tr '\n' ' ')" ;;
+  esac
+  out="$(GRADE_ALLOW_UNREVIEWED=1 python "$G" pick "$DARKSRC" --name 2>/dev/null)"
+  assert_eq "grade: an unreviewed preset can be opted into" "dark" "$out"
+
+  # A sampled guard steps over damage shorter than its stride. Frames 1-9 are blown to
+  # white while frames 0 and 20 - the only ones a stride of 20 looks at - stay grey, so
+  # the old check reported 0.00% clipped on a clip 22.5% destroyed and called it verified.
+  UNG="$W/gap_ungraded.mp4"; GRD="$W/gap_graded.mp4"
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "color=c=gray:s=64x36:r=15:d=3" -frames:v 40 \
+    -vf "geq=lum='128':cb='128':cr='128'" -c:v libx264 -qp 0 -pix_fmt yuv420p "$UNG"
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "color=c=gray:s=64x36:r=15:d=3" -frames:v 40 \
+    -vf "geq=lum='if(between(N,1,9),255,128)':cb='128':cr='128'" -c:v libx264 -qp 0 -pix_fmt yuv420p "$GRD"
+  assert_stderr_matches "grade: the guard sees damage between sampled frames" "destroying picture" \
+    python "$G" verify "$UNG" "$GRD"
+
+  # ...and must still be checked. Setting GRADE is not a licence to destroy the picture.
+  rm -rf "$GOUT"; mkdir -p "$GOUT"
+  out="$(GRADE="eq=contrast=4.0" bash "$REPO/pipeline/finish.sh" "$RAW" G "$SRC" "$GOUT" 2>&1)"
+  case "$out" in
+    *"destroying picture"*) ok "grade: an explicit GRADE is still checked" ;;
+    *) bad "grade: an explicit GRADE is still checked" "a 4x contrast grade was accepted" ;;
+  esac
+
+  # Failing loudly is not enough: the encode used to be written straight to OUT_DIR and
+  # verified afterwards, so a refusal left the destroyed render sitting where a
+  # deliverable belongs, having already overwritten the previous good one. Render a good
+  # one, then attempt a destructive grade over the top of it.
+  rm -rf "$GOUT"; mkdir -p "$GOUT"
+  bash "$REPO/pipeline/finish.sh" "$RAW" G "$SRC" "$GOUT" >/dev/null 2>&1
+  GOOD="$GOUT/G_lumafix_14fps.mp4"
+  if [ ! -f "$GOOD" ]; then
+    bad "grade: a rejected grade does not replace a good render" "no baseline render produced"
+  else
+    BEFORE="$(sha256sum "$GOOD" | cut -d" " -f1)"
+    GRADE="eq=contrast=4.0" bash "$REPO/pipeline/finish.sh" "$RAW" G "$SRC" "$GOUT" >/dev/null 2>&1
+    AFTER="$(sha256sum "$GOOD" | cut -d" " -f1)"
+    if [ "$BEFORE" = "$AFTER" ]; then
+      ok "grade: a rejected grade does not replace a good render"
+    else
+      bad "grade: a rejected grade does not replace a good render" \
+          "the deliverable changed after a grade that was refused"
+    fi
+  fi
 fi
 
 # ---------------------------------------------------------------------------

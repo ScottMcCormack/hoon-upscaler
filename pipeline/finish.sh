@@ -36,7 +36,12 @@ OUT_DIR="${4:-$PWD/out}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
-GRADE="eq=contrast=1.20:saturation=1.28:gamma=0.96"
+# The grade is CHOSEN FROM THE CLIP, not hardcoded. The old fixed value
+# (eq=contrast=1.20:saturation=1.28:gamma=0.96) expands contrast around ffmpeg's fixed
+# pivot of 128, which suits footage sitting near 128 and wrecks footage that does not:
+# it crushed 3.5% of the N90 night clip to black and clipped 51.8% of the Canon daylight
+# clip to white. Set GRADE to override; leave it unset to let pipeline/grade.py pick.
+GRADE="${GRADE:-}"
 W="$OUT_DIR/.work_$TAG"
 
 for f in "$RAW" "$SRC_ORIG"; do
@@ -137,14 +142,44 @@ PY
 
 echo "### [3/5] source-cadence renders"
 BASE_FPS=$(cat "$W/base_fps.txt")
+
+# Pick the grade from the stabilised render's own luma distribution. Done here rather
+# than from the source, because the grade is applied to THIS, and the luma step has
+# already moved the levels.
+if [ -z "$GRADE" ]; then
+  # One call, not two: each invocation decodes the whole stabilised render, so asking
+  # separately for the name and the filter measured the same clip twice for no reason.
+  PICKED="$(python "$HERE/grade.py" pick "$W/stab.mkv" --both)"
+  GRADE_NAME="$(printf '%s\n' "$PICKED" | sed -n 1p)"
+  GRADE="$(printf '%s\n' "$PICKED" | sed -n 2p)"
+  [ -n "$GRADE" ] || { echo "!! grade.py pick returned no filter"; exit 1; }
+  echo "    grade: $GRADE_NAME preset"
+else
+  echo "    grade: explicit (GRADE was set)"
+fi
+echo "    $GRADE"
 ffmpeg -y -v error -r "$BASE_FPS" -f concat -safe 0 -i "$W/concat.txt" -i "$SRC_ORIG" \
   -map 0:v:0 -map 1:a:0? -r "$BASE_FPS" \
   -vf "$GRADE" -c:v libx264 -preset medium -crf 17 -pix_fmt yuv420p \
-  -c:a aac -b:a 128k -movflags +faststart "$OUT_DIR/${TAG}_lumafix_14fps.mp4"
+  -c:a aac -b:a 128k -movflags +faststart "$W/graded.mp4"
 ffmpeg -y -v error -r "$BASE_FPS" -f concat -safe 0 -i "$W/concat.txt" -i "$SRC_ORIG" \
   -map 0:v:0 -map 1:a:0? -r "$BASE_FPS" \
   -c:v libx264 -preset medium -crf 17 -pix_fmt yuv420p \
-  -c:a aac -b:a 128k -movflags +faststart "$OUT_DIR/${TAG}_lumafix_14fps_ungraded.mp4"
+  -c:a aac -b:a 128k -movflags +faststart "$W/ungraded.mp4"
+
+# A grade that pins pixels to a rail has deleted the differences between them, and
+# nothing downstream recovers that. This check is why the 51.8% clip could not ship
+# again unnoticed; it is objective, unlike anything about whether the grade looks good.
+# Both renders are still in the work directory. A rejected grade must not reach OUT_DIR:
+# set -e stops the pipeline either way, but writing the deliverable first means a refusal
+# leaves a destroyed file sitting where a deliverable belongs, having already overwritten
+# the previous good one. This project has shipped a plausible-looking bad file before -
+# a truncated render that only its duration gave away - so "it failed loudly" is not
+# enough on its own. Verify, then move.
+echo "### grade check"
+python "$HERE/grade.py" verify "$W/ungraded.mp4" "$W/graded.mp4"
+mv "$W/graded.mp4"   "$OUT_DIR/${TAG}_lumafix_14fps.mp4"
+mv "$W/ungraded.mp4" "$OUT_DIR/${TAG}_lumafix_14fps_ungraded.mp4"
 
 echo "### [4/5] 60fps interpolation"
 # minterpolate ends before its last input frame - it has nothing to interpolate into -

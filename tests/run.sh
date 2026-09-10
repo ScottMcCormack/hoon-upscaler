@@ -502,6 +502,26 @@ PY
 )"
   assert_eq "grade: percentiles match numpy, not a bin edge" "ok" "$PCT"
 
+  # A clip-wide average dilutes a short destroyed run to nothing. Seven fully clipped
+  # frames in 1480 raise the whole-clip figure by 0.473 points, under the 0.5 tolerance,
+  # while being seven frames with no picture left in them. Scanning every frame fixed the
+  # SAMPLING gap and not this one; they are different holes.
+  LUNG="$W/glong_ung.mp4"; LGRD="$W/glong_grd.mp4"
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "color=c=gray:s=64x36:r=15:d=99" -frames:v 1480 \
+    -vf "geq=lum='128':cb=128:cr=128" -c:v libx264 -qp 0 -pix_fmt yuv420p "$LUNG"
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "color=c=gray:s=64x36:r=15:d=99" -frames:v 1480 \
+    -vf "geq=lum='if(between(N,700,706),255,128)':cb=128:cr=128" -c:v libx264 -qp 0 -pix_fmt yuv420p "$LGRD"
+  assert_stderr_matches "grade: a short destroyed run is caught despite the clip-wide average" \
+    "frame 700" python "$G" verify "$LUNG" "$LGRD"
+
+  # Renders of different length or geometry are not comparable, and percentages computed
+  # across different footage are not evidence. An explicit GRADE carrying a `trim` would
+  # otherwise be scored against a longer ungraded render.
+  SHORTG="$W/gshort.mp4"
+  ffmpeg -hide_banner -loglevel error -y -i "$LGRD" -frames:v 40 -c:v libx264 -qp 0 -pix_fmt yuv420p "$SHORTG"
+  assert_stderr_matches "grade: renders of different length are refused, not compared" \
+    "cannot compare" python "$G" verify "$LUNG" "$SHORTG"
+
   # A VFR clip must measure the frames it has, not the frames ffmpeg pads it to. Without
   # -fps_mode passthrough the default sync duplicates frames to force a constant rate —
   # rawvideo carries no timestamps to prevent it — so a 59-frame clip decoded 61. That
@@ -513,7 +533,7 @@ import subprocess, sys
 sys.path.insert(0, sys.argv[1] + "/pipeline")
 import grade
 declared = grade.frame_count(sys.argv[2])
-_, decoded = grade.histogram(sys.argv[2], 1)
+_, decoded, _ = grade.histogram(sys.argv[2], 1)
 print(f"{declared} {decoded}")
 PY
 )"

@@ -48,6 +48,7 @@ one without listing it here fails the suite.
 - [Copilot on the grade: two real defects and one half-right, 2026-09-07](#copilot-on-the-grade-two-real-defects-and-one-half-right-2026-09-07)
 - [Two adversarial reviews of the grade change, 2026-09-07](#two-adversarial-reviews-of-the-grade-change-2026-09-07)
 - [Failing loudly is not the same as failing safely, 2026-09-08](#failing-loudly-is-not-the-same-as-failing-safely-2026-09-08)
+- [Scanning every frame did not close the hole it was supposed to, 2026-09-08](#scanning-every-frame-did-not-close-the-hole-it-was-supposed-to-2026-09-08)
 - [Reviewing my own work found what the reviewers had already fixed, 2026-09-08](#reviewing-my-own-work-found-what-the-reviewers-had-already-fixed-2026-09-08)
 
 ## Pre-filters — roughly twenty variants, all unnecessary in the end
@@ -688,9 +689,16 @@ old grade                             44.43   <- but 51.8% clipped, so this is
 ```
 
 Three iterations of an automatic thing chasing a target only an eye can call is the shape
-of the six failed perceptual metrics above. So the curves are fixed and eye-checked, only
-the *choice* between them is automatic, and only clipping — which has an objective
-definition — is asserted anywhere.
+of the six failed perceptual metrics above. So the curves are fixed rather than
+synthesised, only the *choice* between them is automatic, and only clipping — which has an
+objective definition — is asserted anywhere.
+
+Fixed is not the same as approved, and the distinction is enforced rather than described: a
+curve becomes auto-selectable only after it has been checked by eye, and until then it sits
+in `UNREVIEWED` and the picker falls back to `neutral`. `dark` is in that state today — see
+the later section on this. An earlier version of this paragraph said the curves were
+"fixed and eye-checked", which was true when written and became false in the same PR that
+introduced the gate.
 
 Note the last row: the old grade scores *highest* on local contrast. Any metric rewarding
 contrast would have preferred it. That is the same trap as the speckle metric that
@@ -870,3 +878,47 @@ does not exist. Mutation-verified both ways.
 That is the general shape worth keeping. A documentation convenience that cannot be checked
 becomes, with time, a confident statement that is wrong - which is the same failure as an
 unverified measurement, wearing different clothes.
+
+## Scanning every frame did not close the hole it was supposed to, 2026-09-08
+
+The guard was changed to scan every frame after a review found that a stride of 20 stepped
+over a nine-frame burst. That fixed the sampling gap and left a second one untouched, which
+the next review round found: **the clip-wide figure is an average, and averages dilute short
+runs to nothing.**
+
+Demonstrated on the real shape of this project's footage - 1480 frames, seven of them fully
+blown to white:
+
+```
+ungraded  clipped 0.000%
+graded    clipped 0.473%      <- under the 0.5 point tolerance, so: verified
+```
+
+Seven frames with no picture left in them, passed as acceptable. The earlier regression test
+only caught its own case because the fixture was 40 frames long, where nine destroyed frames
+are 22.5% of the clip. At real length the same damage is 0.473%.
+
+The fix keeps per-frame rail fractions rather than only the total, and rejects a material
+rise on **any single frame** as well as across the clip. The threshold came from measurement,
+not from choosing a round number:
+
+```
+                                  max single-frame rise in clipping
+chosen 'bright' preset                          -0.70 points   (improves every frame)
+old fixed grade                                +70.42 points
+```
+
+A legitimate preset never raises any frame's clipping at all, so two points sits far above
+the honest case and far below the destructive one.
+
+**A second finding in the same round: `verify` compared renders without checking they were
+comparable.** Each file's decode is cross-checked against its own header, which says nothing
+about the pair. A graded encode that is legitimately shorter - an explicit `GRADE` carrying a
+`trim` - passes its own check and is then scored frame-for-frame against a longer ungraded
+render, with the later `tpad` step turning the missing tail into held frames. Geometry and
+length must match before percentages mean anything.
+
+The lesson is not about grading. **A fix aimed at one hole should be checked against the
+class of hole, not the instance reported.** "Scan everything" answered the sampling gap and
+read like a general answer, which is why the averaging gap survived it - and why the
+write-up claimed a completeness the code did not have.

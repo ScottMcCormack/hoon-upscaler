@@ -27,8 +27,12 @@ each tuned to land closer to a curve that had already been approved by eye, each
 measurably worse than it (tarmac stdev 32.95, then 36.78, against the hand-tuned 39.03).
 That is the shape of the six failed perceptual metrics in docs/findings.md — an
 increasingly elaborate automatic thing chasing a target only an eye can call. So the
-curves here are fixed and were each checked by eye; only the CHOICE between them is
-automatic, and only clipping — which has an objective definition — is asserted.
+curves here are fixed rather than synthesised; only the CHOICE between them is automatic,
+and only clipping — which has an objective definition — is asserted.
+
+Being fixed is not the same as being approved. A curve is auto-selectable only once it has
+been checked by eye; until then it is listed in UNREVIEWED below and the picker falls back
+to neutral rather than applying a look nobody has looked at. `dark` is in that state now.
 
   grade.py pick <video>                choose a preset, print its filter string
   grade.py measure <video>             print the luma stats behind the choice
@@ -38,7 +42,14 @@ import json
 import subprocess
 import sys
 
-TOLERANCE = 0.005          # graded may exceed ungraded clipping by this much, no more
+TOLERANCE = 0.005          # clip-wide: graded may exceed ungraded by this much, no more
+# Per-frame ceiling. The clip-wide figure is an average and averages hide short runs:
+# seven fully clipped frames in 1480 raise the whole-clip number by 0.473 points, under
+# the tolerance above, while being seven frames with no picture left. Measured on real
+# footage, a chosen preset never raises ANY single frame's clipped fraction - the worst
+# was -0.70 points, i.e. an improvement on every frame - while the old fixed grade raised
+# one frame by 70.42. Two points sits far above the first and far below the second.
+LOCAL_TOLERANCE = 0.02
 SAMPLE_EVERY = 20          # frames - for CHOOSING a preset only, never for the guard
 PINNED = 0.01              # >1% of pixels on a rail means that end needs help
 UNREVIEWED = {"dark"}      # eye-approval pending; never auto-selected (see below)
@@ -147,6 +158,7 @@ def histogram(path, every=1):
     with tempfile.TemporaryFile() as errf:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errf)
         counts = np.zeros(256, dtype=np.int64)
+        rails = []          # per-frame (clipped, crushed) fractions
         frame_bytes, frames, buf = w * h, 0, b""
         while True:
             chunk = proc.stdout.read(frame_bytes)
@@ -156,7 +168,17 @@ def histogram(path, every=1):
             n = len(buf) // frame_bytes
             if n:
                 whole, buf = buf[:n * frame_bytes], buf[n * frame_bytes:]
-                counts += np.bincount(np.frombuffer(whole, dtype=np.uint8), minlength=256)
+                for k in range(n):
+                    a = np.frombuffer(whole[k * frame_bytes:(k + 1) * frame_bytes],
+                                      dtype=np.uint8)
+                    bc = np.bincount(a, minlength=256)
+                    counts += bc
+                    # Kept per frame, not just summed. A clip-wide average dilutes a short
+                    # destroyed run into nothing: seven fully clipped frames in 1480 raise
+                    # the whole-clip figure by 0.473 points and slip under a 0.5 tolerance,
+                    # while being seven frames with no picture left in them.
+                    rails.append((float(bc[254:].sum()) / a.size,
+                                  float(bc[:2].sum()) / a.size))
                 frames += n
         proc.stdout.close()
         rc = proc.wait()
@@ -184,7 +206,7 @@ def histogram(path, every=1):
             f"describes only the part that survived.\n{err.strip()}")
     if buf:
         raise SystemExit(f"!! {path}: trailing {len(buf)} bytes, not a whole frame")
-    return counts, frames
+    return counts, frames, rails
 
 
 def _order_stat(cumsum, k):
@@ -230,7 +252,7 @@ def summarise(counts):
 
 
 def stats(path, every=1):
-    counts, _ = histogram(path, every)
+    counts, _, _ = histogram(path, every)
     return summarise(counts)
 
 
@@ -253,7 +275,23 @@ def verify(ungraded, graded):
     # every=1 on both sides. Sampling here would let a clipped shot shorter than the
     # stride pass unseen, and a guard that can step over the damage it checks for is
     # worse than none - it reports "verified".
-    a, b = stats(ungraded), stats(graded)
+    ca, na, ra = histogram(ungraded, 1)
+    cb, nb, rb = histogram(graded, 1)
+
+    # Refuse to compare renders that are not comparable. Each file's own decode is already
+    # cross-checked against its header, but that says nothing about the pair: a graded
+    # encode that is legitimately SHORTER - an explicit GRADE carrying a `trim`, say -
+    # passes its own check and would then be scored frame-for-frame against a longer
+    # ungraded render, with the later tpad step quietly turning the missing tail into held
+    # frames. Percentages computed across different footage are not evidence.
+    if (dims(ungraded) != dims(graded)) or na != nb:
+        raise SystemExit(
+            f"!! cannot compare these renders: ungraded is {dims(ungraded)[0]}x"
+            f"{dims(ungraded)[1]} / {na} frames, graded is {dims(graded)[0]}x"
+            f"{dims(graded)[1]} / {nb} frames. The grade must not change geometry or "
+            f"length; a comparison across different footage says nothing about grading.")
+
+    a, b = summarise(ca), summarise(cb)
     print(f"    ungraded: clipped {100*a['clipped']:.3f}%  crushed {100*a['crushed']:.3f}%")
     print(f"    graded:   clipped {100*b['clipped']:.3f}%  crushed {100*b['crushed']:.3f}%")
     bad = []
@@ -261,10 +299,21 @@ def verify(ungraded, graded):
         bad.append(f"clipping rose {100*a['clipped']:.2f}% -> {100*b['clipped']:.2f}%")
     if b["crushed"] > a["crushed"] + TOLERANCE:
         bad.append(f"crushing rose {100*a['crushed']:.2f}% -> {100*b['crushed']:.2f}%")
+    # Per-frame, not just clip-wide. Same length is guaranteed above, so frames pair up.
+    worst_c = max((rb[i][0] - ra[i][0] for i in range(na)), default=0.0)
+    worst_x = max((rb[i][1] - ra[i][1] for i in range(na)), default=0.0)
+    if worst_c > LOCAL_TOLERANCE:
+        i = max(range(na), key=lambda k: rb[k][0] - ra[k][0])
+        bad.append(f"frame {i} clipping rose {100*ra[i][0]:.1f}% -> {100*rb[i][0]:.1f}%")
+    if worst_x > LOCAL_TOLERANCE:
+        i = max(range(na), key=lambda k: rb[k][1] - ra[k][1])
+        bad.append(f"frame {i} crushing rose {100*ra[i][1]:.1f}% -> {100*rb[i][1]:.1f}%")
+
     if bad:
         raise SystemExit(
             "!! the grade is destroying picture, not shaping it: " + "; ".join(bad) +
-            f"\n   (tolerance {100*TOLERANCE:.1f} points over the ungraded render). Pixels "
+f"\n   (tolerance {100*TOLERANCE:.1f} points clip-wide, {100*LOCAL_TOLERANCE:.1f} "
+            f"points on any single frame). Pixels "
             f"pinned to a rail have lost the differences between them, and no later step "
             f"recovers that. Set GRADE explicitly, or let finish.sh pick one."
         )

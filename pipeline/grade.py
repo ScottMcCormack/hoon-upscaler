@@ -121,16 +121,23 @@ def histogram(path, every=1):
         vf = "format=gray"
         want = expected
     else:
-        # -fps_mode passthrough matters: without it ffmpeg's default sync DUPLICATES the
-        # selected frames back up to a constant rate, so `every=20` decoded ~70% of the
-        # clip rather than 5% and the "speed knob" barely turned.
         vf = rf"select='not(mod(n\,{every}))',format=gray"
         want = (expected + every - 1) // every if expected else 0
 
-    cmd = ["ffmpeg", "-v", "error", "-i", path, "-an", "-vf", vf]
-    if every > 1:
-        cmd += ["-fps_mode", "passthrough"]
-    cmd += ["-f", "rawvideo", "-pix_fmt", "gray", "-"]
+    # -fps_mode passthrough on EVERY path, not just the sampled one. Without it ffmpeg's
+    # default sync duplicates frames to force a constant output rate, and rawvideo has no
+    # timestamps to stop it. Two consequences, both bad:
+    #
+    #   - a 59-frame VFR clip emits 61 gray frames, so the decode cross-check below
+    #     rejects a perfectly good file;
+    #   - worse, the histogram then counts duplicated frames twice, so the statistics are
+    #     weighted by ffmpeg's padding rather than the footage. The source this project
+    #     exists for is VFR, so that is the normal case here, not an edge one.
+    #
+    # It was added to the sampled branch first and not this one — the same asymmetry
+    # CLAUDE.md warns about, in the commit that fixed the other half.
+    cmd = ["ffmpeg", "-v", "error", "-i", path, "-an", "-vf", vf,
+           "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "gray", "-"]
 
     # stderr goes to a file, never a pipe. A pipe deadlocks: this loop blocks reading
     # stdout, ffmpeg blocks writing a full stderr pipe nobody is draining, and neither
@@ -166,8 +173,13 @@ def histogram(path, every=1):
     # inference output: a crashed run left a plausible short file that only its duration
     # gave away. A guard that reports "verified" on half a clip is worse than no guard.
     if want and frames != want:
+        # Say what was actually expected and why. When sampling, `want` is the expected
+        # SAMPLED count, not the file's own — an earlier version reported "the file claims
+        # 2" for a 30-frame clip at every=20, which is not a thing the file ever said.
+        detail = (f"expected {want} ({expected} frames sampled every {every})"
+                  if every > 1 else f"the file declares {expected}")
         raise SystemExit(
-            f"!! {path}: decoded {frames} frames but the file claims {want}. "
+            f"!! {path}: decoded {frames} frames but {detail}. "
             f"The file is truncated or failed to decode, and any measurement of it "
             f"describes only the part that survived.\n{err.strip()}")
     if buf:

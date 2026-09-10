@@ -502,6 +502,35 @@ PY
 )"
   assert_eq "grade: percentiles match numpy, not a bin edge" "ok" "$PCT"
 
+  # A VFR clip must measure the frames it has, not the frames ffmpeg pads it to. Without
+  # -fps_mode passthrough the default sync duplicates frames to force a constant rate —
+  # rawvideo carries no timestamps to prevent it — so a 59-frame clip decoded 61. That
+  # both rejected a good file and weighted the histogram by ffmpeg's padding. The source
+  # this project exists for is VFR, so this is the normal case here.
+  mk_vfr_source "$W/gvfr.mp4" 40 5 8
+  VFRN="$(python - "$REPO" "$W/gvfr.mp4" <<'PY'
+import subprocess, sys
+sys.path.insert(0, sys.argv[1] + "/pipeline")
+import grade
+declared = grade.frame_count(sys.argv[2])
+_, decoded = grade.histogram(sys.argv[2], 1)
+print(f"{declared} {decoded}")
+PY
+)"
+  # Compare against the DECLARED count, not against the other half of the same string.
+  # The first version of this asserted "${VFRN%% *}" = "${VFRN##* }", and when the helper
+  # died both halves were the empty string and the test passed — a mutation removing
+  # passthrough left it green while breaking five other tests. A test whose two sides can
+  # both be empty is not comparing anything.
+  case "$VFRN" in
+    [0-9]*" "[0-9]*)
+      assert_eq "grade: a VFR clip measures its own frames, not ffmpeg's padding" \
+        "${VFRN%% *}" "${VFRN##* }" ;;
+    *)
+      bad "grade: a VFR clip measures its own frames, not ffmpeg's padding" \
+          "measurement failed: ${VFRN:-<no output>}" ;;
+  esac
+
   # ffprobe failing must produce the written diagnostic, not a CalledProcessError
   # traceback. The message existed before this test and was unreachable, because
   # check=True raised first.

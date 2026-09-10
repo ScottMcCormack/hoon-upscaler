@@ -115,11 +115,21 @@ def frame_count(path):
 def histogram(path, every=1):
     """256-bin luma histogram of a clip, streamed.
 
-    Returns (counts, frames). Memory is constant in clip length: frames are consumed as
-    they arrive and only the bin counts are kept. That is what makes scanning EVERY frame
-    affordable - buffering a 1480-frame 1080p render would be ~3GB, on a machine whose
-    docs already record the OOM killer taking processes out. Measured: 622MB for 300
-    frames at 1080p, which extrapolates to 3.07GB for the real clip.
+    Returns (counts, frames, rails), where `rails` holds one (clipped, crushed) pair per
+    decoded frame.
+
+    Memory, precisely: **pixel** memory is constant - one frame is decoded, counted and
+    discarded, never the clip. Per-frame statistics are linear, at roughly 113 bytes a
+    frame: measured 167KB of `rails` for 1480 frames. The comparison that matters is
+    against buffering the pixels themselves, which for a 1480-frame 1080p render is 3.07GB
+    (measured 622MB at 300 frames), on a machine whose docs record the OOM killer taking
+    processes out.
+
+    So the linear part is ~18,000x smaller than the part that was removed, and `rails` is
+    kept rather than streamed because verify() needs to pair frame i of one render against
+    frame i of the other - which two independent decodes cannot do without holding one
+    side. An earlier version of this docstring said "constant memory" full stop, which
+    stopped being true when per-frame rails were added.
 
     `every=1` scans everything. Sampling is a speed knob for choosing a preset, never for
     the guard: a sampled check can step straight over a clipped shot shorter than its

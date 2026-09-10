@@ -714,9 +714,11 @@ destroyed "verified".
 
 Sampling is now a speed knob for *choosing* a preset only. The guard scans every frame,
 which it can afford because the statistics come from a streamed 256-bin histogram rather
-than a buffered array: constant memory regardless of clip length. Buffering every frame of
-a 1480-frame 1080p render would be ~3GB on a machine whose notes already record the OOM
-killer taking processes out. uint8 has 256 possible values, so mean and percentiles from
+than a buffered array: constant PIXEL memory, one frame at a time. (A later round added
+per-frame rail statistics, which are linear but tiny - see the section on the averaging
+gap below; this paragraph originally said "constant memory regardless of clip length" and
+that stopped being true.) Buffering every frame of a 1480-frame 1080p render would be
+~3GB on a machine whose notes already record the OOM killer taking processes out. uint8 has 256 possible values, so mean and percentiles from
 the histogram are exact, not approximations.
 
 **A test that proved only that a message was printed.** `GRADE="eq=saturation=1.0"` is an
@@ -899,7 +901,15 @@ only caught its own case because the fixture was 40 frames long, where nine dest
 are 22.5% of the clip. At real length the same damage is 0.473%.
 
 The fix keeps per-frame rail fractions rather than only the total, and rejects a material
-rise on **any single frame** as well as across the clip. The threshold came from measurement,
+rise on **any single frame** as well as across the clip.
+
+That changes the memory story, so state it precisely rather than repeating the old
+headline. **Pixel** memory is still constant - one frame decoded, counted, discarded. The
+per-frame statistics are linear: ~113 bytes a frame, measured at 167KB for 1480 frames,
+against the 3.07GB that buffering the pixels would cost. The linear part is roughly
+18,000x smaller than the part that was removed, which is why it is worth paying; but
+"constant memory regardless of clip length" was the claim before rails existed and is no
+longer true as written. The threshold came from measurement,
 not from choosing a round number:
 
 ```

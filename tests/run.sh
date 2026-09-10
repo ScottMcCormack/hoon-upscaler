@@ -669,6 +669,25 @@ if want interp; then
     "RIFE is not set up" \
     env INTERP=rife RIFE_HOME="$W/no-such-rife" bash "$REPO/pipeline/finish.sh" "$RAW" I "$SRC" "$IOUT"
 
+  # The recommendation must not depend on output size. Block motion in pixels scales with
+  # resolution, so a 60px threshold judged the SAME footage "minterpolate" at width 440 and
+  # "rife" at width 520 — decided by the render size rather than by the motion, and this
+  # pipeline renders at both 720p and 1080p. The measure is a fraction of width for that
+  # reason; this pins it.
+  RSRC="$W/ires.mp4"
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=s=320x240:r=15:d=4" -frames:v 40 \
+    -vf "crop=240:180:min(iw-240\,n*6):20" -c:v libx264 -crf 18 -pix_fmt yuv420p "$RSRC"
+  RSMALL="$(python "$REPO/pipeline/rife.py" recommend "$RSRC" 2>/dev/null)"
+  ffmpeg -hide_banner -loglevel error -y -i "$RSRC" -vf "scale=iw*4:ih*4:flags=bicubic" \
+    -c:v libx264 -crf 18 -pix_fmt yuv420p "$W/ires_big.mp4"
+  RBIG="$(python "$REPO/pipeline/rife.py" recommend "$W/ires_big.mp4" 2>/dev/null)"
+  if [ -n "$RSMALL" ] && [ "$RSMALL" = "$RBIG" ]; then
+    ok "interp: the same footage picks the same interpolator at 1x and 4x ($RSMALL)"
+  else
+    bad "interp: the same footage picks the same interpolator at 1x and 4x" \
+        "1x said '${RSMALL:-<none>}', 4x said '${RBIG:-<none>}'"
+  fi
+
   # ...and auto must fall BACK rather than fail, since minterpolate still produces
   # something watchable for most footage.
   clean_iout

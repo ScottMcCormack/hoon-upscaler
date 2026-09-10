@@ -6,10 +6,14 @@ WHY THIS EXISTS
 `minterpolate` searches for each block's motion within `search_param` pixels, default 32.
 That was never sized against footage that pans. Measured per-frame block motion:
 
-    N90 clip (minterpolate fine)      p95  39px
-    Canon skidpan clip (glassy)       p95 130px
+    N90 clip (minterpolate fine)      p95  1.86% of frame width
+    MVI_0081, Canon (glassy)          p95  6.81% of frame width
 
-At 130px the true vector is outside the window the estimator can look in, so it returns a
+Measured on the sources themselves, and as a fraction because the pixel figure depends on
+what resolution you measure at - see MOTION_THRESHOLD.
+
+On the deliverable that is ~130px, well outside the 32px window the estimator can look in,
+so it returns a
 wrong one and the compensation warps the picture along it. The result reads as the frame
 flowing rather than moving.
 
@@ -44,8 +48,27 @@ import subprocess
 import sys
 
 # Above this p95 block motion, minterpolate's default 32px search is too small and its
-# output warps. Sits between the two clips measured: 39px (fine) and 130px (glassy).
-MOTION_THRESHOLD = 60.0
+# output warps.
+#
+# Expressed as a FRACTION OF FRAME WIDTH, not in pixels. Block motion scales with
+# resolution, so an absolute threshold means different things on different renders:
+# measured on one six-second clip, the same footage gives
+#
+#     width  296  ->  37.6px      width 1024  ->  141.9px
+#     width  640  ->  84.7px      width 1914  ->  229.0px
+#
+# a 6.1x spread in pixels against 1.3x as a fraction. With a 60px threshold that footage
+# was judged "minterpolate" at width 440 and "rife" at width 520 - the same footage, a
+# different answer, decided by the output size rather than by the motion. This pipeline
+# renders at 720p or 1080p, so that was reachable, not theoretical.
+#
+# 3% sits between the two clips that calibrated it, measured at their own widths:
+#     N90 clip (minterpolate fine)   5.8px / 312  = 1.86%
+#     MVI_0081 (glassy)             20.2px / 296  = 6.82%
+# The earlier "39px and 130px" figures are the same two clips measured on their upscaled
+# deliverables (~2000px wide), which is why they could not be reproduced from the sources
+# the docstring named. As fractions they agree with the numbers above.
+MOTION_THRESHOLD = 0.03
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RIFE_HOME = os.environ.get("RIFE_HOME", os.path.join(HERE, "..", "work", "rife"))
@@ -77,7 +100,10 @@ def pad_to(scale):
 
 
 def block_motion(path, sample=400):
-    """p95 of per-frame p99 block motion, in pixels at the video's own width.
+    """p95 of per-frame p99 block motion, as a FRACTION of frame width.
+
+    Normalised deliberately - see MOTION_THRESHOLD. The pixel figure is resolution
+    dependent and this decision must not be.
 
     Per-BLOCK, not global camera displacement. On the N90 clip block motion exceeds
     global by 2.33x because the camera is near-static and the subject moves; deriving
@@ -86,12 +112,13 @@ def block_motion(path, sample=400):
     import cv2
     import numpy as np
     cap = cv2.VideoCapture(path)
-    prev, vals, n = None, [], 0
+    prev, vals, n, width = None, [], 0, 0
     while n < sample:
         ok, f = cap.read()
         if not ok:
             break
         h, w = f.shape[:2]
+        width = w
         small = cv2.resize(cv2.cvtColor(f, cv2.COLOR_BGR2GRAY), (w // 4, h // 4))
         if prev is not None:
             fl = cv2.calcOpticalFlowFarneback(prev, small, None, 0.5, 3, 15, 3, 5, 1.2, 0)
@@ -101,7 +128,9 @@ def block_motion(path, sample=400):
     cap.release()
     if not vals:
         raise SystemExit(f"!! {path}: could not measure motion")
-    return float(np.percentile(vals, 95))
+    if not width:
+        raise SystemExit(f"!! {path}: frame width is zero, cannot normalise motion")
+    return float(np.percentile(vals, 95)) / width
 
 
 def available():
@@ -195,7 +224,8 @@ def main():
     if cmd == "measure":
         m = block_motion(sys.argv[2])
         rec = "rife" if m > MOTION_THRESHOLD else "minterpolate"
-        print(f"block motion p95: {m:.1f}px  threshold {MOTION_THRESHOLD:.0f}px  -> {rec}")
+        print(f"block motion p95: {100*m:.2f}% of width  "
+              f"threshold {100*MOTION_THRESHOLD:.1f}%  -> {rec}")
     elif cmd == "recommend":
         m = block_motion(sys.argv[2])
         print("rife" if m > MOTION_THRESHOLD else "minterpolate")

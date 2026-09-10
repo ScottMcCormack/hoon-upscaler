@@ -27,6 +27,7 @@ one without listing it here fails the suite.
 - [Motion and timing](#motion-and-timing)
 - [Interpolation and stall handling — five things ruled out, 2026-09-03](#interpolation-and-stall-handling--five-things-ruled-out-2026-09-03)
 - [minterpolate cannot interpolate a fast pan, 2026-09-06](#minterpolate-cannot-interpolate-a-fast-pan-2026-09-06)
+- [The interpolator threshold was measured in the wrong units, 2026-09-08](#the-interpolator-threshold-was-measured-in-the-wrong-units-2026-09-08)
 
 **Grading**
 
@@ -948,6 +949,7 @@ footage that pans:
                        block motion p95     frames beyond a 32px search
 N90 clip (fine)              39px                     ~5%
 MVI_0081 (glassy)           130px                    32.4%   (60% of the first 5s)
+                       (both measured on the 1080p deliverables, ~2000px wide)
 ```
 
 At 15fps the frames are the model's own, so nothing is synthesised and nothing warps —
@@ -1006,3 +1008,40 @@ truncated inference output already in CLAUDE.md, arrived at from the other direc
 measured against the 32px threshold, where it moves 32.4% to 31.1% — negligible, and
 reported as such. Against the 200px threshold it removes 4 of the 6 remaining bad frames.
 Useless alone, near-complete in combination.
+
+## The interpolator threshold was measured in the wrong units, 2026-09-08
+
+Self-review of the RIFE branch, before asking anyone else to look at it. The finding is not
+in the mechanism - block compensation really does fail on a fast pan, and RIFE really does
+fix it - but in how the decision between them is made.
+
+**The recorded figures could not be reproduced from the files they named.** The docstring
+said the N90 clip measures p95 39px and MVI_0081 130px. Measuring those files gives 5.8px
+and 20.2px. Both discrepancies are the same ratio, and both imply a source about 2000px
+wide: the numbers were taken from the **1080p deliverables**, not from the sources the text
+pointed at. Nothing was wrong with the measurements; the text simply did not say what had
+been measured, which made them unreproducible and therefore unverifiable.
+
+**Worse, the threshold was in absolute pixels.** Block motion scales with resolution, so
+60px means different things on different renders. Same six seconds of footage, varying only
+width:
+
+```
+width  296  ->   37.6px         width 1024  ->  141.9px
+width  440  ->   47.7px         width 1914  ->  229.0px
+width  640  ->   84.7px
+```
+
+A 6.1x spread in pixels against 1.3x as a fraction of width. With the 60px threshold that
+footage was judged **minterpolate at width 440 and rife at width 520** - the same footage,
+opposite answers, decided by output size rather than by motion. This pipeline renders at
+both 720p and 1080p, so it was reachable rather than theoretical.
+
+`block_motion` now returns a fraction of frame width and the threshold is 3%. That
+reproduces the original calibration exactly - N90 1.86%, MVI_0081 6.81%, threshold between
+them - while removing the dependence on render size. A test pins it: the same clip at 1x
+and 4x must pick the same interpolator, and reverting to pixels fails it.
+
+The general point is one this project keeps meeting from new angles. **A measurement needs
+its units and its baseline recorded, or it is an anecdote.** "39px" is not a fact about a
+clip; it is a fact about a clip at a resolution, and the resolution was the part left out.

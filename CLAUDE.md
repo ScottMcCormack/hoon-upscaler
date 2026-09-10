@@ -90,8 +90,10 @@ computed where the effect should not appear — catches most of it.
   translation; rotation fitting chases noise and produces a swimming picture.
 - **No `unsharp` in the grade.** It rings on high-contrast lettering.
 - **Match the interpolator to the motion.** `minterpolate` searches 32px by default and
-  warps the picture when the true motion is outside that. Fine at 39px p95 block motion
-  (N90), glassy at 130px (Canon skidpan). Raising the search range does not fix it —
+  warps the picture when the true motion is outside that. Fine at 1.86% of frame width
+  p95 block motion (N90), glassy at 6.81% (MVI_0081). Measured as a FRACTION: block motion
+  in pixels scales with resolution, and an absolute threshold judged the same footage
+  differently at 720p and 1080p. Raising the search range does not fix it —
   measured at zero frames beyond range and still wrong. `finish.sh` picks by measurement;
   RIFE handles the fast case. Neither fixes baked-in motion blur, which is a reason to
   drop the output frame rate rather than to change interpolator.

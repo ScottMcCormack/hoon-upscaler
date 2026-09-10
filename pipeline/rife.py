@@ -134,9 +134,16 @@ def block_motion(path, sample=400):
 
 
 def available():
+    """Whether RIFE can actually be RUN, not merely whether its files are present.
+
+    os.access(X_OK) rather than exists(): finish.sh invokes the venv interpreter directly,
+    so a present-but-not-executable python passed this check and then fell through to the
+    system python - which has no torch, or a different one. The check and the invocation
+    have to ask the same question.
+    """
     py = os.path.join(RIFE_HOME, "venv", "bin", "python")
     weights = os.path.join(RIFE_REPO, "train_log", "flownet.pkl")
-    return os.path.exists(py) and os.path.exists(weights)
+    return os.access(py, os.X_OK) and os.path.exists(weights)
 
 
 def interpolate(src, dst, multi=4, scale=1.0):
@@ -206,8 +213,16 @@ def interpolate(src, dst, multi=4, scale=1.0):
 
     wr.stdin.close()
     rd.stdout.close()
-    wr.wait()
-    rd.wait()
+    wr_rc = wr.wait()
+    rd_rc = rd.wait()
+    # Without this, a decoder or encoder failure surfaces later as "could not probe the
+    # output", which points at the wrong thing entirely. Report the stage that failed.
+    if rd_rc != 0:
+        raise SystemExit(f"!! reading {src} failed (ffmpeg exit {rd_rc}) - "
+                         f"unreadable input, or no decoder for it")
+    if wr_rc != 0:
+        raise SystemExit(f"!! writing {dst} failed (ffmpeg exit {wr_rc}) - "
+                         f"no encoder, no space, or an unwritable path")
 
     got = probe(dst)[3]
     want = (n - 1) * multi + 1
@@ -228,7 +243,13 @@ def main():
               f"threshold {100*MOTION_THRESHOLD:.1f}%  -> {rec}")
     elif cmd == "recommend":
         m = block_motion(sys.argv[2])
-        print("rife" if m > MOTION_THRESHOLD else "minterpolate")
+        rec = "rife" if m > MOTION_THRESHOLD else "minterpolate"
+        print(rec)
+        # Second line only on request, so a caller needing the number for its log does not
+        # pay for a second decode of up to 400 frames. Same shape as grade.py --both.
+        if len(sys.argv) > 3 and sys.argv[3] == "--explain":
+            print(f"block motion p95: {100*m:.2f}% of width, "
+                  f"threshold {100*MOTION_THRESHOLD:.1f}%")
     elif cmd == "interpolate":
         if len(sys.argv) < 4:
             raise SystemExit("usage: rife.py interpolate <in> <out> [multi] [scale]")

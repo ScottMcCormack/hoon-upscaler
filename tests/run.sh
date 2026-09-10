@@ -688,12 +688,62 @@ if want interp; then
         "1x said '${RSMALL:-<none>}', 4x said '${RBIG:-<none>}'"
   fi
 
-  # ...and auto must fall BACK rather than fail, since minterpolate still produces
-  # something watchable for most footage.
+  # available() must ask the same question the caller asks. finish.sh runs the venv
+  # interpreter directly, so a python that EXISTS but is not executable used to pass the
+  # availability check and then fall through to the system python — no torch, or the wrong
+  # torch, and a failure reported from deep inside the model instead of here.
+  FAKE="$W/fake_rife"
+  mkdir -p "$FAKE/venv/bin" "$FAKE/Practical-RIFE/train_log"
+  printf '#!/bin/sh\nexit 0\n' > "$FAKE/venv/bin/python"
+  : > "$FAKE/Practical-RIFE/train_log/flownet.pkl"
+  chmod -x "$FAKE/venv/bin/python"
+  AV="$(RIFE_HOME="$FAKE" python -c "
+import os, sys
+sys.path.insert(0, '$REPO/pipeline')
+import rife
+print('yes' if rife.available() else 'no')")"
+  assert_eq "interp: a non-executable venv python counts as unavailable" "no" "$AV"
+  chmod +x "$FAKE/venv/bin/python"
+  AV2="$(RIFE_HOME="$FAKE" python -c "
+import os, sys
+sys.path.insert(0, '$REPO/pipeline')
+import rife
+print('yes' if rife.available() else 'no')")"
+  assert_eq "interp: an executable venv python counts as available" "yes" "$AV2"
+
+  # --explain must actually explain. finish.sh reads the recommendation from line 1 and the
+  # measurement from line 2 of ONE call; if the second line goes missing the log silently
+  # loses the number that justified the choice.
+  EXPL="$(python "$REPO/pipeline/rife.py" recommend "$W/ires.mp4" --explain 2>/dev/null)"
+  case "$(printf '%s\n' "$EXPL" | sed -n 2p)" in
+    *"block motion"*"% of width"*) ok "interp: recommend --explain reports the measurement" ;;
+    *) bad "interp: recommend --explain reports the measurement" \
+           "second line was: $(printf '%s\n' "$EXPL" | sed -n 2p)" ;;
+  esac
+
   clean_iout
   out="$(env INTERP=minterpolate bash "$REPO/pipeline/finish.sh" "$RAW" I "$SRC" "$IOUT" 2>&1)"
   if [ -f "$IOUT/I_lumafix_K5.mp4" ]; then ok "interp: explicit minterpolate still completes"
   else bad "interp: explicit minterpolate still completes" "$(printf '%s' "$out" | tail -1)"; fi
+
+  # ...and auto must fall BACK rather than fail, since minterpolate still produces
+  # something watchable for most footage. The comment above used to sit on the test
+  # immediately preceding it, which runs INTERP=minterpolate explicitly and therefore
+  # never went near the fallback: auto was not exercised, and neither was its warning.
+  # RIFE_HOME points somewhere empty, so `available()` is false and the branch is forced.
+  clean_iout
+  out="$(env INTERP=auto RIFE_HOME="$W/no_rife_here" bash "$REPO/pipeline/finish.sh" \
+    "$RAW" I "$SRC" "$IOUT" 2>&1)"
+  if [ ! -f "$IOUT/I_lumafix_K5.mp4" ]; then
+    bad "interp: auto falls back to minterpolate when RIFE is absent" \
+        "no deliverable: $(printf '%s' "$out" | tail -1)"
+  else
+    case "$out" in
+      *"auto -> "*) ok "interp: auto falls back to minterpolate when RIFE is absent" ;;
+      *) bad "interp: auto falls back to minterpolate when RIFE is absent" \
+             "auto path never ran: $(printf '%s' "$out" | grep -i interp | head -1)" ;;
+    esac
+  fi
 fi
 
 # ---------------------------------------------------------------------------

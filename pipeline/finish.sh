@@ -207,8 +207,11 @@ case "$INTERP" in
   *) echo "!! unknown INTERP '$INTERP' - expected auto, minterpolate or rife"; exit 1 ;;
 esac
 if [ "$INTERP" = "auto" ]; then
-  INTERP="$(python "$HERE/rife.py" recommend "$OUT_DIR/${TAG}_lumafix_14fps.mp4")"
-  echo "    auto -> $INTERP  ($(python "$HERE/rife.py" measure "$OUT_DIR/${TAG}_lumafix_14fps.mp4"))"
+  # One call, not two. block_motion reads up to 400 frames through OpenCV, and asking
+  # separately for the recommendation and the number measured the same clip twice.
+  RECO="$(python "$HERE/rife.py" recommend "$OUT_DIR/${TAG}_lumafix_14fps.mp4" --explain)"
+  INTERP="$(printf '%s\n' "$RECO" | sed -n 1p)"
+  echo "    auto -> $INTERP  ($(printf '%s\n' "$RECO" | sed -n 2p))"
   if [ "$INTERP" = "rife" ] && ! python -c "
 import sys; sys.path.insert(0,'$HERE'); import rife; sys.exit(0 if rife.available() else 1)"; then
     echo "    !! this footage wants RIFE but it is not set up (see pipeline/rife.py)."
@@ -229,7 +232,11 @@ import sys; sys.path.insert(0,'$HERE'); import rife; sys.exit(0 if rife.availabl
     exit 1
   fi
   RIFE_PY="${RIFE_HOME:-$REPO/work/rife}/venv/bin/python"
-  [ -x "$RIFE_PY" ] || RIFE_PY=python
+  # No fallback to the system python. It would run RIFE against whatever torch happens to
+  # be on PATH - or none - and report the confusing failure from deep inside the model
+  # rather than the plain one here.
+  [ -x "$RIFE_PY" ] || { echo "!! $RIFE_PY is not executable. RIFE needs its own venv;" >&2
+                         echo "   see the setup notes in pipeline/rife.py." >&2; exit 1; }
   "$RIFE_PY" "$HERE/rife.py" interpolate \
     "$OUT_DIR/${TAG}_lumafix_14fps.mp4" "$W/i60_raw.mp4" 4 1.0
   # RIFE emits (n-1)*4+1: there is nothing past the last source frame to interpolate

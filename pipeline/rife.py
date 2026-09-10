@@ -151,6 +151,11 @@ def interpolate(src, dst, multi=4, scale=1.0):
     import torch
 
     tmp = pad_to(scale)
+    # Resolve BEFORE the chdir below. Practical-RIFE must be imported from its own
+    # directory, and after chdir a relative src/dst resolves against that directory
+    # instead of the caller's - which surfaced as an ffprobe CalledProcessError naming a
+    # file that plainly exists, pointing nowhere near the actual problem.
+    src, dst = os.path.abspath(src), os.path.abspath(dst)
     sys.path.insert(0, RIFE_REPO)
     os.chdir(RIFE_REPO)
     from train_log.RIFE_HDv3 import Model
@@ -187,8 +192,17 @@ def interpolate(src, dst, multi=4, scale=1.0):
         return torch.nn.functional.pad(t, (0, pw - w, 0, ph - h), mode="replicate")
 
     def emit(t):
-        wr.stdin.write((t[0, :, :h, :w].clamp(0, 1) * 255).byte()
-                       .permute(1, 2, 0).cpu().numpy().tobytes())
+        # An encoder that has already exited turns this write into BrokenPipeError, which
+        # would surface as a traceback rather than as the stage-specific message the exit
+        # code checks below produce. Same failure, so give it the same answer.
+        try:
+            wr.stdin.write((t[0, :, :h, :w].clamp(0, 1) * 255).byte()
+                           .permute(1, 2, 0).cpu().numpy().tobytes())
+        except BrokenPipeError:
+            raise SystemExit(
+                f"!! writing {dst} failed: the encoder exited while frames were still "
+                f"being sent (ffmpeg's own error is above). Usually an unwritable path, "
+                f"a full disk, or no encoder for the requested format.")
 
     # Streaming, deliberately. 852 input frames plus 3405 output at 1902x1080 is ~30GB
     # held at once, against 15GB of RAM (CLAUDE.md), so the whole-file approach meets the

@@ -46,7 +46,7 @@ one without listing it here fails the suite.
 - [My own audio fix cost the pipeline a redundant remux, and could delete a finished render, 2026-09-12](#my-own-audio-fix-cost-the-pipeline-a-redundant-remux-and-could-delete-a-finished-render-2026-09-12)
 - [The stride grid's blind spot was never only at the tail, 2026-09-12](#the-stride-grids-blind-spot-was-never-only-at-the-tail-2026-09-12)
 - [A flag fixed to one argv position broke the shorter form its own usage line advertised, 2026-09-12](#a-flag-fixed-to-one-argv-position-broke-the-shorter-form-its-own-usage-line-advertised-2026-09-12)
-- [nan and inf pass "<= 0", and a three-file guard only ever had two files tested, 2026-09-12](#nan-and-inf-pass-0-and-a-three-file-guard-only-ever-had-two-files-tested-2026-09-12)
+- [nan and inf pass "<= 0", and a three-file guard only ever had two files tested, 2026-09-12](#nan-and-inf-pass--0-and-a-three-file-guard-only-ever-had-two-files-tested-2026-09-12)
 - [RIFE blends across hard scene cuts, and this repo cannot verify a fix, 2026-09-12](#rife-blends-across-hard-scene-cuts-and-this-repo-cannot-verify-a-fix-2026-09-12)
 - [A merged stderr stream could silently corrupt the auto-selected interpolator, 2026-09-12](#a-merged-stderr-stream-could-silently-corrupt-the-auto-selected-interpolator-2026-09-12)
 - [A run that failed after grading could leave a fresh 14fps pair beside a stale K5, 2026-09-12](#a-run-that-failed-after-grading-could-leave-a-fresh-14fps-pair-beside-a-stale-k5-2026-09-12)

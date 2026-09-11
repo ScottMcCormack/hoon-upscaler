@@ -8,7 +8,7 @@
 #         with a CLIP argument, <CLIP>_full.mp4 and <CLIP>_test.mp4.
 #         All are already stabilised and cropped to 16:9, with no pre-filter.
 #         None are in the repo - they are media. Make them from the stabilised
-#         source (see README "Prepare the source"), then upload to this
+#         source (see docs/pipeline.md "Prepare the source"), then upload to this
 #         directory on the pod:
 #           ffmpeg -i stabilised.mp4 -vf "crop=312:176:0:0" -crf 0 full_169.mp4
 #           ffmpeg -i full_169.mp4 -frames:v 214 -c copy   test_15s.mp4

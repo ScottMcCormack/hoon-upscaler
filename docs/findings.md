@@ -32,6 +32,7 @@ one without listing it here fails the suite.
 - [Fixing the multiplier did not fix the rate, 2026-09-11](#fixing-the-multiplier-did-not-fix-the-rate-2026-09-11)
 - [Even timestamps are not even motion, 2026-09-11](#even-timestamps-are-not-even-motion-2026-09-11)
 - [A full-branch self-review found four stale numbers no round had checked, 2026-09-11](#a-full-branch-self-review-found-four-stale-numbers-no-round-had-checked-2026-09-11)
+- [p95 over a whole clip discards its top 5% by definition, 2026-09-11](#p95-over-a-whole-clip-discards-its-top-5-by-definition-2026-09-11)
 
 **Grading**
 
@@ -1216,3 +1217,50 @@ against the *previous* round's claims. None re-derived a claim from the file it 
 supposedly describing. The fix here was mechanical once looked for - `grep` for the two old
 figures found all four locations in under a second - the missing step was deciding to look,
 which took a full read of the branch as one piece rather than as six sequential patches.
+
+## p95 over a whole clip discards its top 5% by definition, 2026-09-11
+
+A percentile is not immune to the blind spot it was built to fix. `block_motion` scanning
+the whole clip (see the entry above) closed the first-400-frames blind spot; a clip-wide
+`p95` has a structurally identical one at a different scale, and it took a direct Copilot
+review to name it.
+
+**p95 discards the top 5% of samples by construction.** If the frames genuinely needing
+RIFE - a real, severe pan - make up less than 5% of the clip's total length, the p95
+statistic never sees them: they ARE the discarded top 5%. Reproduced: 40 fast-panning
+frames in a 990-frame clip (4.0%, the same pan speed a 12.5%-panning fixture correctly
+flags) measured **0.00%** and picked `minterpolate` - the exact glassy failure this tool
+exists to prevent, for footage that is mostly calm with one bad stretch, which is a
+perfectly ordinary way for real handheld footage to behave.
+
+**Fix: a windowed maximum, not a single global percentile.** `block_motion` now takes the
+mean motion within short (~1s) windows and reports the MAX across windows, with a half-
+window stride so a pan straddling a window boundary still lands fully inside at least one
+offset window. A window only has to be internally fast; it no longer needs to be a minimum
+share of the whole clip. The 4% fixture above now measures 20.55% and correctly selects
+`rife`.
+
+**The threshold moved again, a third time, for the same underlying footage.** Windowing
+changes what the statistic reports even on clips with no short/rare pans - it now measures
+N90 at 2.96% and MVI_0081 at 11.65%, both up from the un-windowed 1.94%/5.58%, because
+"maximum of short-window means" and "p95 across the whole clip" are different quantities
+even when computed on the same data. `MOTION_THRESHOLD` moved from 3% to 6% to keep a
+comfortable margin from both (roughly 2x above N90, roughly half of MVI_0081) - up from a
+2.9x gap between the calibration clips to a 3.9x one, since windowing raises the floor for
+footage that is mostly calm with brief fast passages more than it raises footage with
+sustained panning throughout.
+
+**Verifying the fix exposed a second, unrelated defect in the resolution-independence
+test.** Rerunning it after the windowing change failed: the same footage, compared 1x
+against a 4x bicubic upscale of itself, picked different interpolators. Tracing it down
+found the OLD un-windowed statistic already disagreed by 6.2x between the two resolutions
+(6.39% against 39.39%) - it just happened that both numbers cleared the old 3% threshold,
+so the test passed by coincidence of where the threshold sat, not because the measurement
+was actually resolution-independent. The cause is specific to the fixture, not to
+`block_motion`: bicubic-upscaling a low-resolution synthetic test pattern and re-measuring
+optical flow on the blown-up result introduces flow-estimation artifacts of its own, most
+visible in the first several frames after the resize. Two INDEPENDENTLY rendered clips at
+the two resolutions - the actual relationship between a 720p and a 1080p render of real
+footage - measure within 0.6 points of each other (5.06% vs 5.65%) and land on the same
+side of the threshold, confirming the property genuinely holds; only the derived-by-
+upscaling test fixture did not. The suite now renders both sizes natively.

@@ -675,13 +675,21 @@ if want interp; then
   # "rife" at width 520 — decided by the render size rather than by the motion, and this
   # pipeline renders at both 720p and 1080p. The measure is a fraction of width for that
   # reason; this pins it.
+  # Rendered NATIVELY at both sizes, not one derived by upscaling the other. An earlier
+  # version of this fixture bicubic-upscaled the 1x render 4x before re-measuring it, and
+  # that upscale step itself introduced a resolution-dependent optical-flow artifact
+  # (verified: the OLD un-windowed statistic already showed a 6.2x spread between the two
+  # from this cause alone, just landing both sides of the old 3% threshold so the test
+  # passed by coincidence). Two independent native renders of the same pan speed - the
+  # comparison real 720p/1080p footage actually is - avoid that confound entirely.
   RSRC="$W/ires.mp4"
   ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=s=320x240:r=15:d=4" -frames:v 40 \
     -vf "crop=240:180:min(iw-240\,n*6):20" -c:v libx264 -crf 18 -pix_fmt yuv420p "$RSRC"
   RSMALL="$(python "$REPO/pipeline/rife.py" recommend "$RSRC" 2>/dev/null)"
-  ffmpeg -hide_banner -loglevel error -y -i "$RSRC" -vf "scale=iw*4:ih*4:flags=bicubic" \
-    -c:v libx264 -crf 18 -pix_fmt yuv420p "$W/ires_big.mp4"
-  RBIG="$(python "$REPO/pipeline/rife.py" recommend "$W/ires_big.mp4" 2>/dev/null)"
+  RBIGSRC="$W/ires_big_native.mp4"
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=s=1280x960:r=15:d=4" -frames:v 40 \
+    -vf "crop=960:720:min(iw-960\,n*24):80" -c:v libx264 -crf 18 -pix_fmt yuv420p "$RBIGSRC"
+  RBIG="$(python "$REPO/pipeline/rife.py" recommend "$RBIGSRC" 2>/dev/null)"
   if [ -n "$RSMALL" ] && [ "$RSMALL" = "$RBIG" ]; then
     ok "interp: the same footage picks the same interpolator at 1x and 4x ($RSMALL)"
   else
@@ -771,6 +779,21 @@ PY
     bad "interp: a pan after frame 400 still selects rife" \
         "whole clip said '${LATE_ALL:-<none>}', first 400 said '${LATE_400:-<none>}'"
   fi
+
+  # A severe pan under 5% of the clip's total length must still select rife. p95 over
+  # the whole clip discards its top 5% by definition, so a single clip-wide percentile
+  # cannot see a real, severe pan shorter than that share - reproduced: 40 fast-panning
+  # frames in a 990-frame clip (4.0%, same pan speed the 12.5% fixture above correctly
+  # catches) measured 0.00% and picked minterpolate before block_motion was windowed.
+  SHORTPAN="$W/ishortpan.mp4"
+  ffmpeg -hide_banner -loglevel error -y \
+    -f lavfi -i "color=c=gray:s=160x120:r=15:d=70" \
+    -f lavfi -i "testsrc2=s=320x240:r=15:d=6" \
+    -filter_complex "[0:v]trim=end_frame=950,setpts=PTS-STARTPTS[a];\
+[1:v]trim=end_frame=40,setpts=PTS-STARTPTS,crop=160:120:min(iw-160\,n*20):40[b];[a][b]concat=n=2:v=1[v]" \
+    -map "[v]" -frames:v 990 -c:v libx264 -crf 18 -pix_fmt yuv420p "$SHORTPAN"
+  SHORTPAN_REC="$(python "$REPO/pipeline/rife.py" recommend "$SHORTPAN" 2>/dev/null)"
+  assert_eq "interp: a severe pan under 5% of the clip still selects rife" "rife" "$SHORTPAN_REC"
 
   # A partial setup must not pass. interpolate() does `from train_log.RIFE_HDv3 import
   # Model`, so weights alone are not enough: the old check looked only for flownet.pkl and

@@ -36,10 +36,14 @@ source (352×288, VFR, heavily compressed)
 
 Steps 5-8 are automated by `pipeline/finish.sh`.
 
-Step 8 picks its interpolator by measurement. `minterpolate` searches 32px for each
-block's motion and warps the picture when the real motion is further than that — fine on
-near-static footage (1.94% of frame width, p95 block motion), and visibly wrong on a clip
-that pans (5.58%). Raising the search range does not help; RIFE does. `INTERP=minterpolate|rife|auto`
+Step 8 picks its interpolator by measurement. On a fast pan, newly revealed content has no
+correspondence in the previous frame, so `minterpolate`'s block compensation stretches
+neighbours into it and the picture flows rather than moves — fine on near-static footage
+(2.96% of frame width, windowed block motion), visibly wrong on a clip that pans (11.65%).
+Raising the search range does not help — the search window is a ruled-out hypothesis, not
+the cause; block motion is used as a proxy because it tracks the real mechanism, fast
+panning, without measuring it directly. RIFE synthesises those regions instead.
+`INTERP=minterpolate|rife|auto`
 overrides the choice, and RIFE needs a one-off setup described in `pipeline/rife.py`.
 
 ## Setup

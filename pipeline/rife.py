@@ -6,8 +6,8 @@ WHY THIS EXISTS
 `minterpolate` searches for each block's motion within `search_param` pixels, default 32.
 That was never sized against footage that pans. Measured per-frame block motion:
 
-    N90 clip (minterpolate fine)      p95  1.94% of frame width
-    MVI_0081, Canon (glassy)          p95  5.58% of frame width
+    N90 clip (minterpolate fine)      windowed  2.96% of frame width
+    MVI_0081, Canon (glassy)          windowed 11.65% of frame width
 
 Measured on the sources themselves, and as a fraction because the pixel figure depends on
 what resolution you measure at - see MOTION_THRESHOLD.
@@ -58,7 +58,7 @@ import os
 import subprocess
 import sys
 
-# Above this p95 block motion, minterpolate's output warps. Block motion is a PROXY here,
+# Above this windowed motion, minterpolate's output warps. Block motion is a PROXY here,
 # not the cause - see the module docstring: the mechanism is occlusion on a fast pan, and
 # fast panning is what makes block motion large. Selecting on the symptom is deliberate;
 # the cause has no cheap direct measurement.
@@ -75,15 +75,16 @@ import sys
 # different answer, decided by the output size rather than by the motion. This pipeline
 # renders at 720p or 1080p, so that was reachable, not theoretical.
 #
-# 3% sits between the two clips that calibrated it, measured on the full clips - this
-# scans every frame (see block_motion), not a short segment, and reproduces the same
-# numbers reported in the module docstring above:
-#     N90 clip (minterpolate fine)   1.94% p95, full 1480-frame clip
-#     MVI_0081 (glassy)              5.58% p95, full 852-frame clip
-# The earlier "39px and 130px" figures are the same two clips measured on their upscaled
-# deliverables (~2000px wide), which is why they could not be reproduced from the sources
-# the docstring named. As fractions they agree with the numbers above.
-MOTION_THRESHOLD = 0.03
+# 6% sits between the two clips that calibrated it, measured on the full clips with the
+# windowed statistic block_motion now uses (a single clip-wide p95 let a real, severe
+# pan hide below the threshold whenever it was under ~5% of the clip's total length -
+# see block_motion's docstring):
+#     N90 clip (minterpolate fine)    2.96% windowed max, full 1480-frame clip
+#     MVI_0081 (glassy)              11.65% windowed max, full 852-frame clip
+# A 3.9x gap, wider than the un-windowed statistic's (1.94% to 5.58%, a 2.9x gap) gave -
+# windowing raises the floor for a clip that is MOSTLY calm with brief fast passages,
+# which is what MVI_0081 partly is, more than it raises a clip with sustained panning.
+MOTION_THRESHOLD = 0.06
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RIFE_HOME = os.environ.get("RIFE_HOME", os.path.join(HERE, "..", "work", "rife"))
@@ -114,8 +115,9 @@ def pad_to(scale):
     return max(128, int(128 / scale))
 
 
-def block_motion(path, sample=None):
-    """p95 of per-frame p99 block motion, as a FRACTION of frame width.
+def block_motion(path, sample=None, window_s=1.0):
+    """Windowed motion, as a FRACTION of frame width: the fastest ~window_s-second
+    stretch in the clip, not a single global percentile over the whole thing.
 
     Normalised deliberately - see MOTION_THRESHOLD. The pixel figure is resolution
     dependent and this decision must not be.
@@ -123,6 +125,16 @@ def block_motion(path, sample=None):
     Per-BLOCK, not global camera displacement. On the N90 clip block motion exceeds
     global by 2.33x because the camera is near-static and the subject moves; deriving
     from global displacement there would under-size the search by more than half.
+
+    WHY WINDOWED, NOT A SINGLE CLIP-WIDE p95. p95 over N per-frame values discards the
+    top 5% by definition - fine when the fast stretch IS a big enough share of the clip,
+    silent otherwise. A clip 4% panning at the same speed that correctly selects rife at
+    12.5% measured 0.00% and picked minterpolate: the pan sat entirely inside the
+    discarded top 5%, so it could not affect the statistic no matter how severe it was.
+    Taking the mean within short windows and the MAX across windows instead means a
+    window only has to be internally fast, never a minimum share of the whole clip - a
+    single bad half-second registers the same whether the clip is 10 seconds or 10
+    minutes long.
     """
     import cv2
     import numpy as np
@@ -133,6 +145,7 @@ def block_motion(path, sample=None):
     # and the answer moved (1.86% -> 1.94%), so even the calibration clip was not
     # represented by its opening.
     cap = cv2.VideoCapture(path)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 15.0
     prev, vals, n, width = None, [], 0, 0
     while sample is None or n < sample:
         ok, f = cap.read()
@@ -151,7 +164,17 @@ def block_motion(path, sample=None):
         raise SystemExit(f"!! {path}: could not measure motion")
     if not width:
         raise SystemExit(f"!! {path}: frame width is zero, cannot normalise motion")
-    return float(np.percentile(vals, 95)) / width
+    arr = np.array(vals)
+    win = max(1, int(round(window_s * fps)))
+    if len(arr) <= win:
+        # Shorter than one window - nothing to slide, the clip IS the window.
+        return float(arr.mean()) / width
+    # Half-window stride: a pan that straddles a window boundary still lands fully
+    # inside at least one offset window, rather than being split and diluted in both.
+    stride = max(1, win // 2)
+    starts = range(0, len(arr) - win + 1, stride)
+    worst = max(float(arr[i:i + win].mean()) for i in starts)
+    return worst / width
 
 
 def output_schedule(n_src, src_fps, target_fps=60.0):

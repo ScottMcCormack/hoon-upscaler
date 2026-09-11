@@ -637,6 +637,17 @@ echo "interpolation"
 if want interp; then
   R="$REPO/pipeline/rife.py"; G_RIFE="$R"
 
+  # Five cases below vary only which fake RIFE_HOME is passed; sharing the probe itself
+  # means what is actually under test - which directory - is the only thing left at each
+  # call site, instead of being buried in four lines of boilerplate repeated five times.
+  rife_available() {  # rife_available <RIFE_HOME>   -> "yes" or "no"
+    RIFE_HOME="$1" python -c "
+import sys
+sys.path.insert(0, '$REPO/pipeline')
+import rife
+print('yes' if rife.available() else 'no')"
+  }
+
   # The padding multiple is derived from scale, not from the network stride. Getting it
   # wrong fails deep inside the flow blocks, so it is worth pinning.
   assert_eq "interp: pad multiple at scale 1.0"  "128" "$(python -c "import sys;sys.path.insert(0,'$REPO/pipeline');import rife;print(rife.pad_to(1.0))")"
@@ -708,18 +719,10 @@ if want interp; then
   : > "$FAKE/Practical-RIFE/train_log/RIFE_HDv3.py"
   : > "$FAKE/Practical-RIFE/train_log/IFNet_HDv3.py"
   chmod -x "$FAKE/venv/bin/python"
-  AV="$(RIFE_HOME="$FAKE" python -c "
-import os, sys
-sys.path.insert(0, '$REPO/pipeline')
-import rife
-print('yes' if rife.available() else 'no')")"
+  AV="$(rife_available "$FAKE")"
   assert_eq "interp: a non-executable venv python counts as unavailable" "no" "$AV"
   chmod +x "$FAKE/venv/bin/python"
-  AV2="$(RIFE_HOME="$FAKE" python -c "
-import os, sys
-sys.path.insert(0, '$REPO/pipeline')
-import rife
-print('yes' if rife.available() else 'no')")"
+  AV2="$(rife_available "$FAKE")"
   assert_eq "interp: an executable venv python counts as available" "yes" "$AV2"
 
   # The output clock must be evenly spaced at every source rate. This is the property
@@ -800,20 +803,12 @@ PY
   # let a half-installed model through to fail with ModuleNotFoundError from inside the
   # import — the exact failure this guard exists to pre-empt.
   rm -f "$FAKE/Practical-RIFE/train_log/IFNet_HDv3.py"
-  AV4="$(RIFE_HOME="$FAKE" python -c "
-import os, sys
-sys.path.insert(0, '$REPO/pipeline')
-import rife
-print('yes' if rife.available() else 'no')")"
+  AV4="$(rife_available "$FAKE")"
   assert_eq "interp: a model missing IFNet_HDv3.py counts as unavailable" "no" "$AV4"
   : > "$FAKE/Practical-RIFE/train_log/IFNet_HDv3.py"
 
   rm -f "$FAKE/Practical-RIFE/train_log/RIFE_HDv3.py"
-  AV3="$(RIFE_HOME="$FAKE" python -c "
-import os, sys
-sys.path.insert(0, '$REPO/pipeline')
-import rife
-print('yes' if rife.available() else 'no')")"
+  AV3="$(rife_available "$FAKE")"
   assert_eq "interp: weights without the model code count as unavailable" "no" "$AV3"
   : > "$FAKE/Practical-RIFE/train_log/RIFE_HDv3.py"
 
@@ -829,11 +824,7 @@ print('yes' if rife.available() else 'no')")"
   for fpart in flownet.pkl RIFE_HDv3.py IFNet_HDv3.py; do
     : > "$BROKEN/Practical-RIFE/train_log/$fpart"
   done
-  AV5="$(RIFE_HOME="$BROKEN" python -c "
-import os, sys
-sys.path.insert(0, '$REPO/pipeline')
-import rife
-print('yes' if rife.available() else 'no')")"
+  AV5="$(rife_available "$BROKEN")"
   assert_eq "interp: a venv that cannot import the model counts as unavailable" "no" "$AV5"
 
   # --explain must actually explain. finish.sh reads the recommendation from line 1 and the

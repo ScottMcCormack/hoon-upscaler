@@ -33,6 +33,7 @@ one without listing it here fails the suite.
 - [Even timestamps are not even motion, 2026-09-11](#even-timestamps-are-not-even-motion-2026-09-11)
 - [A full-branch self-review found four stale numbers no round had checked, 2026-09-11](#a-full-branch-self-review-found-four-stale-numbers-no-round-had-checked-2026-09-11)
 - [p95 over a whole clip discards its top 5% by definition, 2026-09-11](#p95-over-a-whole-clip-discards-its-top-5-by-definition-2026-09-11)
+- [An independent high-effort review found ten more, all in code no round had touched, 2026-09-11](#an-independent-high-effort-review-found-ten-more-all-in-code-no-round-had-touched-2026-09-11)
 
 **Grading**
 
@@ -1264,3 +1265,72 @@ the two resolutions - the actual relationship between a 720p and a 1080p render 
 footage - measure within 0.6 points of each other (5.06% vs 5.65%) and land on the same
 side of the threshold, confirming the property genuinely holds; only the derived-by-
 upscaling test fixture did not. The suite now renders both sizes natively.
+
+## An independent high-effort review found ten more, all in code no round had touched, 2026-09-11
+
+A `/code-review --high` pass, separate from the Copilot cycles, ranked ten findings by
+severity against the accumulated branch. Six correctness, three maintainability, one test
+coverage. All ten were real; one scenario didn't reproduce as described, and the underlying
+defect it pointed at was real anyway.
+
+**The `recommend` call eleven lines above a guarded probe was itself unguarded.** Bare
+`RECO="$(rife.py recommend ...)"` under `set -e`: if `block_motion` raised on an
+unmeasurable render, this killed `finish.sh` immediately - after luma-fix, cadence-restore
+and grading had already run - instead of falling back to minterpolate. Mutation-verified
+both directions: without the guard, a forced failure aborts the pipeline after grading (2
+of 3 deliverables, no 60fps output); with it, the same failure logs a message and produces
+all three. Fixing this properly meant fixing the duplicated `&&/||` idiom too (see below),
+since patching just this one call site would have been the fourth time it needed writing.
+
+**A relative `RIFE_HOME` broke two different ways, not the one way described.** The review's
+scenario was "the probe says available, then `interpolate()` dies" - reproduced instead
+that BOTH break, differently: the probe's `subprocess.run(cwd=RIFE_REPO)` resolves a
+relative executable path against the CHILD's cwd (documented Python behaviour), so it
+looked for the venv python at `RIFE_REPO/RIFE_REPO/venv/bin/python` and failed with "No
+such file" - correctly reporting unavailable, just for the wrong-sounding reason.
+`interpolate()`'s `sys.path.insert` before `os.chdir` breaks the same way on the import
+side. Neither failure is the one the review described, but both are real, and the fix is
+the same either way: normalise `RIFE_HOME` to absolute the moment it is read, which removes
+the whole class rather than patching each call site's particular symptom.
+
+**The calibration numbers were measured on the source; production measures the render.**
+Camera stalls become repeated, zero-motion frames after cadence-restore, and a windowed-max
+statistic can move either direction depending on where those repeats land relative to the
+fastest window - measured: N90 source 2.96% vs render 3.27% (up), MVI_0081 source 11.65%
+vs render 9.95% (down). Neither crosses the 6% threshold either way, so no decision was
+ever wrong, but the documented numbers now come from the actual file `recommend` measures.
+
+**The RIFE path paid for an extra lossy generation minterpolate does not.** `interpolate()`
+wrote its output at crf 12, and `finish.sh` re-encoded that at crf 12 again for the
+tpad/trim pass; minterpolate goes through that second pass only, once. Comparing `auto`
+(which picks RIFE on a pan) against forced minterpolate by eye - this project's standard
+way of judging anything perceptual - would have compared generation count along with
+interpolator, the "more than the variable under test differs" trap by name. `interpolate()`
+now writes lossless (crf 0); it is an intermediate immediately re-encoded again, so disk
+space is the resource to spend, not quality.
+
+**`rife.py`'s `probe()` never got the `check=True` fix `grade.py`'s `dims()` already
+carries**, with a comment explaining why. Found by accident, reproduced while testing an
+unrelated change: a bad path raised a raw `CalledProcessError` traceback instead of the
+clean `SystemExit` every other guard in this pipeline is tested against. Same fix.
+
+**Three maintainability findings, all real duplication with a named future failure mode
+attached, not duplication for its own sake:** the `&&/||` exit-capture idiom at two call
+sites (a future third site copying the surrounding pattern and missing that one line has
+already happened once); the tpad/trim/encode settings spelled out independently in both
+interpolator branches (a `stop=8` or `crf` change landing in one and not its twin); the
+`"rife" if m > MOTION_THRESHOLD else "minterpolate"` comparison duplicated between
+`measure` and `recommend` (nothing stopping the two commands from silently disagreeing).
+Fixing the first turned out not to be reducible to a single shared helper the naive way:
+`X="$(fn ...)"` runs `fn` in a subshell, so an out-parameter `fn` sets is invisible to the
+caller once that subshell exits - the actual fix shares the invocation and leaves the
+`&& OK=0 || OK=$?` capture at each call site, which is a one-line idiom instead of a
+multi-line block, not eliminated entirely. Bash's own scoping rules set a floor under how
+much of this class of duplication can be removed.
+
+**One test-coverage finding:** five near-identical 4-line inline Python snippets probing
+`rife.available()` across ~110 lines, differing only in which fake `RIFE_HOME` was passed.
+One shared `rife_available()` helper now takes the directory as its only argument, which is
+also the only thing that was actually under test at each site.
+
+108 tests, all fixes mutation-verified.

@@ -258,21 +258,28 @@ if [ "$INTERP" = "rife" ]; then
   # frame-count and duration checks did not notice.
   "$RIFE_PY" "$HERE/rife.py" interpolate \
     "$OUT_DIR/${TAG}_lumafix_14fps.mp4" "$W/i60_raw.mp4" 60 1.0
-  # RIFE emits (n-1)*4+1: there is nothing past the last source frame to interpolate
-  # into. Same tail as minterpolate, so the same fix - clone, then trim to the count the
-  # SOURCE timestamps imply rather than to whatever the render happened to produce.
+  I60_SRC="$W/i60_raw.mp4"
   # fps=60 is now a no-op - RIFE emits at exactly 60 - and is kept as a belt-and-braces
   # assertion of the contract rather than as the fix it briefly was. If the interpolator
   # ever returns to a non-60 rate, this keeps the DURATION right even though it cannot
   # keep the cadence even; the schedule test is what protects the cadence.
-  ffmpeg -y -v error -i "$W/i60_raw.mp4" \
-    -vf "tpad=stop=8:stop_mode=clone,fps=60,trim=end_frame=$EXPECT60,setpts=PTS-STARTPTS" \
-    -c:v libx264 -preset fast -crf 12 -an "$W/i60.mp4"
+  I60_FILTER="fps=60"
 else
-  ffmpeg -y -v error -i "$OUT_DIR/${TAG}_lumafix_14fps.mp4" \
-    -vf "tpad=stop=8:stop_mode=clone,minterpolate=fps=60:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1:scd=none,trim=end_frame=$EXPECT60,setpts=PTS-STARTPTS" \
-    -c:v libx264 -preset fast -crf 12 -an "$W/i60.mp4"
+  I60_SRC="$OUT_DIR/${TAG}_lumafix_14fps.mp4"
+  I60_FILTER="minterpolate=fps=60:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1:scd=none"
 fi
+# The tail fix, the trim target and the encode settings are shared between both
+# interpolators - only the input and the middle filter differ (rife's own pass already
+# produced 60fps frames and needs no further interpolation there; minterpolate does both
+# steps in one filter). Sharing this means a future change to stop=8, or to crf, cannot
+# land in one branch and not its twin the way two independently-spelled-out ffmpeg
+# commands invited.
+# RIFE emits (n-1)*4+1: there is nothing past the last source frame to interpolate into.
+# Clone a few frames so the filter chain has somewhere to run to, then trim to the count
+# the SOURCE timestamps imply rather than to whatever the render happened to produce.
+ffmpeg -y -v error -i "$I60_SRC" \
+  -vf "tpad=stop=8:stop_mode=clone,${I60_FILTER},trim=end_frame=$EXPECT60,setpts=PTS-STARTPTS" \
+  -c:v libx264 -preset fast -crf 12 -an "$W/i60.mp4"
 I60_N=$(ffprobe -v error -select_streams v:0 -count_packets -show_entries stream=nb_read_packets -of csv=p=0 "$W/i60.mp4")
 echo "    interpolated $I60_N frames"
 if [ "$I60_N" -ne "$EXPECT60" ]; then

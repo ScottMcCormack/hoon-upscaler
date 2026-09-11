@@ -6,11 +6,16 @@ WHY THIS EXISTS
 `minterpolate` searches for each block's motion within `search_param` pixels, default 32.
 That was never sized against footage that pans. Measured per-frame block motion:
 
-    N90 clip (minterpolate fine)      windowed  2.96% of frame width
-    MVI_0081, Canon (glassy)          windowed 11.65% of frame width
+    N90 clip (minterpolate fine)      windowed  3.27% of frame width
+    MVI_0081, Canon (glassy)          windowed  9.95% of frame width
 
-Measured on the sources themselves, and as a fraction because the pixel figure depends on
-what resolution you measure at - see MOTION_THRESHOLD.
+Measured on the actual `_lumafix_14fps.mp4` renders finish.sh passes to recommend() - not
+the raw sources, which read close but not identical (N90 2.96%, MVI_0081 11.65%). Camera
+stalls become repeated, zero-motion frames after cadence-restore, which can pull a
+windowed-max statistic either up or down depending on where in the clip the repeats land
+relative to the fastest window; measuring what production actually thresholds is what
+matters, not which direction any one clip happened to move. Both margins stay comfortable
+either way - the discrepancy has not been observed to flip a decision on real footage.
 
 The mechanism is occlusion, not the search window. At this speed roughly 8.4% of the frame
 width is newly revealed each frame, and that content has no correspondence in the previous
@@ -87,16 +92,40 @@ import sys
 MOTION_THRESHOLD = 0.06
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-RIFE_HOME = os.environ.get("RIFE_HOME", os.path.join(HERE, "..", "work", "rife"))
+# abspath() here, not just on the default: a relative RIFE_HOME override breaks in two
+# different ways downstream, verified by direct reproduction rather than assumed. The
+# probe in unavailable_reason() passes the venv python as a relative executable to
+# subprocess.run(cwd=RIFE_REPO) - Python's documented behaviour is to resolve a relative
+# executable against the CHILD's cwd, not the caller's, so it looked for
+# RIFE_REPO/RIFE_REPO/venv/bin/python and failed with "No such file". interpolate()
+# fails differently: sys.path.insert(0, RIFE_REPO) followed by os.chdir(RIFE_REPO) means
+# the still-relative sys.path entry gets re-resolved against the POST-chdir cwd at
+# import time, doubling the path the same way. Normalising once here, before either code
+# path can see the raw value, removes both failure modes instead of patching each one.
+RIFE_HOME = os.path.abspath(os.environ.get("RIFE_HOME", os.path.join(HERE, "..", "work", "rife")))
 RIFE_REPO = os.path.join(RIFE_HOME, "Practical-RIFE")
 
 
 def probe(path):
+    # No check=True: grade.py's dims() carries the same fix with the trap written out -
+    # check=True raises CalledProcessError before a clean message can run, so the
+    # commonest bad input (a missing or non-video path) produced a raw traceback instead
+    # of the SystemExit every other guard in this pipeline is tested against. Reproduced
+    # here by accident while testing an unrelated change, which is how this was found.
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
          "stream=width,height,r_frame_rate,nb_read_packets", "-count_packets",
-         "-of", "csv=p=0", path], capture_output=True, text=True, check=True).stdout.strip()
-    w, h, rate, n = out.split(",")
+         "-of", "csv=p=0", path], capture_output=True, text=True).stdout.strip()
+    parts = out.split(",")
+    if len(parts) != 4 or not all(parts[:2] + [parts[3]]):
+        raise SystemExit(
+            f"!! {path}: could not read video info (ffprobe said {out!r}). "
+            f"The file is missing, unreadable, or not a video.")
+    w, h, rate, n = parts
+    if not (w.isdigit() and h.isdigit() and n.isdigit()):
+        raise SystemExit(
+            f"!! {path}: could not read video info (ffprobe said {out!r}). "
+            f"The file is missing, unreadable, or not a video.")
     num, _, den = rate.partition("/")
     return int(w), int(h), float(num) / float(den or 1), int(n)
 
@@ -281,9 +310,18 @@ def interpolate(src, dst, target_fps=60.0, scale=1.0):
 
     rd = subprocess.Popen(["ffmpeg", "-v", "error", "-i", src, "-f", "rawvideo",
                            "-pix_fmt", "rgb24", "-"], stdout=subprocess.PIPE)
+    # Lossless (crf 0), not crf 12: this file is an INTERMEDIATE that finish.sh
+    # immediately re-encodes again (tpad/fps/trim, its own crf 12). The minterpolate path
+    # is a single lossy generation; without this, the rife path was two - crf 12 here,
+    # crf 12 again in finish.sh - so an eye comparison between `auto`-selected RIFE and
+    # forced minterpolate confounded "which interpolator" with "how many times was this
+    # re-encoded," the exact "more than the variable under test differs" trap CLAUDE.md
+    # names as the cause of every prior wrong conclusion in this project. Larger on disk,
+    # briefly, which is the cheaper resource here - not memory (streamed for that reason
+    # already, see below) and not something that survives past finish.sh's next pass.
     wr = subprocess.Popen(["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt",
                            "rgb24", "-s", f"{w}x{h}", "-r", f"{target_fps:g}", "-i", "-",
-                           "-c:v", "libx264", "-preset", "fast", "-crf", "12", "-pix_fmt",
+                           "-c:v", "libx264", "-preset", "veryfast", "-crf", "0", "-pix_fmt",
                            "yuv420p", dst], stdin=subprocess.PIPE)
     fsz = w * h * 3
 
@@ -368,6 +406,16 @@ def interpolate(src, dst, target_fps=60.0, scale=1.0):
     print(f"    {got} frames")
 
 
+def recommendation(m):
+    """The decision itself, in one place. `measure` and `recommend` used to each spell
+    out `"rife" if m > MOTION_THRESHOLD else "minterpolate"` independently - harmless
+    while the comparison is one operator against one constant, but a future change (>=,
+    a resolution-aware threshold) would have two call sites to update with nothing to
+    say whether both were, and the two commands could silently disagree on the same clip.
+    """
+    return "rife" if m > MOTION_THRESHOLD else "minterpolate"
+
+
 def main():
     # `why` is the one command that takes no argument, so the arity check cannot be a
     # single threshold — it printed the whole docstring instead of answering.
@@ -376,12 +424,12 @@ def main():
     cmd = sys.argv[1]
     if cmd == "measure":
         m = block_motion(sys.argv[2])
-        rec = "rife" if m > MOTION_THRESHOLD else "minterpolate"
+        rec = recommendation(m)
         print(f"block motion p95: {100*m:.2f}% of width  "
               f"threshold {100*MOTION_THRESHOLD:.1f}%  -> {rec}")
     elif cmd == "recommend":
         m = block_motion(sys.argv[2])
-        rec = "rife" if m > MOTION_THRESHOLD else "minterpolate"
+        rec = recommendation(m)
         print(rec)
         # Second line only on request, so a caller needing the number for its log does not
         # pay for a second pass over the clip - which is now the WHOLE clip, making the

@@ -2009,7 +2009,7 @@ mattered were not the ones the specs suggested.
                     21042007052.mp4 (N90)      MVI_0081.avi (Canon)
 container/codec     mp4 / mpeg4                AVI / MJPEG, intra-only
 resolution          352x288 (CIF)              320x240 (4:3, square px)
-video bitrate       509 kbps                   1449 kbps  (~19x per pixel)
+video bitrate       509 kbps                   1449 kbps  (~3.8x per pixel)
 pixel format        yuv420p, pc range          yuvj422p, pc range
 timing              15fps VFR, with stalls     15fps CFR, 851/851 gaps at 66.666ms
 length              1480 frames / 103.7s       852 frames / 56.8s
@@ -2024,7 +2024,7 @@ is the stall-free CFR case already unit-tested above, now confirmed on real foot
 `mpdecimate` drops 2 of 852 frames, so the constant timestamps reflect genuine constant
 motion rather than a camera padding its output.
 
-### Stabiliser smoothing has to match the camera's motion, and 20 is wrong here
+### Stabiliser smoothing has to match the camera's motion
 
 The N90 clip is near-static handheld. This one is a tracking shot: phase correlation over
 all 852 frames gives mean inter-frame displacement 6.44px and a **cumulative horizontal
@@ -2042,9 +2042,24 @@ smoothing   worst border intrusion   mean black area   residual shake (9-frame)
 ```
 
 Smoothing 10 already recovers all the available shake reduction; 30 and 60 buy nothing and
-consume up to half the frame. The README's documented `smoothing=20` sits between the first
-two rows. Across the full clip at smoothing 10, worst intrusion is 11px on 15 of 852 frames,
-which a 12px crop margin absorbs.
+consume up to half the frame. The README's documented `smoothing=20` was not itself in this
+table — it was described by extrapolation between the 10 and 30 rows, which is not the same
+as measuring it. Measured directly, same segment, an equivalent script (values are not
+directly comparable to the table above; the metric is analogous, not identical):
+
+```
+smoothing   worst border intrusion   mean black area   residual shake (9-frame)
+   10                   3px                0.01%              0.44 px/frame
+   20                  24px                0.67%              0.49 px/frame
+   30                  52px                3.45%              0.57 px/frame
+   60                 143px               14.07%              0.55 px/frame
+```
+
+Same shape as the first measurement: shake reduction saturates at 10 (0.44 -> 0.49 at 20 is
+noise, not improvement) while border cost keeps climbing (3px -> 24px, 8x). 20 is not "far
+too wide" the way 30 and 60 are — it is a real, moderate cost bought for zero shake benefit
+over 10, which is the actual, now-measured case for not using it. Across the full clip at
+smoothing 10, worst intrusion is 11px on 15 of 852 frames, which a 12px crop margin absorbs.
 
 The rule is not "use 10". It is that the window must be shorter than the camera's intended
 movement, and the cost of getting it wrong is measurable before any GPU is rented.
@@ -2061,8 +2076,12 @@ MVI_0081           217.9     26.5     161/851  = 18.9%   -> monotonic runs (drif
 ```
 
 The drift is the operator panning off a blown sky onto shaded ground over the closing six
-seconds, 231 -> 117 mean Y. That is a real exposure change in the scene, not a defect, and a
-61-frame rolling normalisation would flatten it. Untested against a render so far; the call
+seconds, 231 -> 117 mean Y. Direction-flip counting can only distinguish oscillation from a
+trend - it cannot on its own say the trend is the camera's exposure adjusting rather than
+the scene itself getting darker as the frame fills with ground instead of sky, and a pan
+like this one is the more direct explanation. Either way it is scene content, not the
+metering hunt `luma_stabilise.py` targets, and a 61-frame rolling normalisation would
+flatten it regardless of which cause is right. Untested against a render so far; the call
 belongs to the eye, on a visual comparison of the finish pass with and without the step.
 
 This is the same shape as the pre-filter finding: a step that is correct for one source is

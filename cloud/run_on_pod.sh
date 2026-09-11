@@ -25,7 +25,10 @@
 set -euo pipefail
 case "${1:-}" in
   -h|--help)
-    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+    # 2,23 so the named-clip usage example (line 23) is included - it stopped at 20
+    # before, which cut --help off after the third usage line and never showed how to
+    # actually invoke the CLIP argument the two lines above it document.
+    sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
     exit 0 ;;
 esac
 # Reject extra arguments rather than ignoring them: a mistyped invocation should say so,

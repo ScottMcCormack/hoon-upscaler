@@ -332,6 +332,17 @@ if [ -f "$CLOUD/sr_test_720.mp4" ]; then
   bad "clip: does not write the legacy output name" "sr_test_720.mp4 was created too"
 else ok "clip: does not write the legacy output name"; fi
 
+# The manifest is namespaced the same way the video is - MANIFEST is derived from OUT,
+# not re-derived from CLIP independently, so a regression that broke that derivation
+# (or hardcoded the manifest path elsewhere) would write sr_demo_test_720.mp4 correctly
+# and still silently overwrite the legacy sr_test_720.json. Only the video was checked
+# above; the manifest is the record that makes a namespaced master reproducible.
+if [ -f "$CLOUD/sr_demo_test_720.json" ]; then ok "clip: writes the namespaced manifest"
+else bad "clip: writes the namespaced manifest" "no sr_demo_test_720.json"; fi
+if [ -f "$CLOUD/sr_test_720.json" ]; then
+  bad "clip: does not write the legacy manifest name" "sr_test_720.json was created too"
+else ok "clip: does not write the legacy manifest name"; fi
+
 # Omitting the argument must still reproduce the original invocation, or the recorded
 # 720p master stops being replayable.
 out="$(run_pod bash "$CLOUD/run_on_pod.sh" 720 test)"

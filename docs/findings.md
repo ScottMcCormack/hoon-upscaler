@@ -29,6 +29,7 @@ one without listing it here fails the suite.
 - [minterpolate cannot interpolate a fast pan, 2026-09-06](#minterpolate-cannot-interpolate-a-fast-pan-2026-09-06)
 - [The interpolator threshold was measured in the wrong units, 2026-09-08](#the-interpolator-threshold-was-measured-in-the-wrong-units-2026-09-08)
 - [The interpolator's blind spots were all in what it did not look at, 2026-09-11](#the-interpolators-blind-spots-were-all-in-what-it-did-not-look-at-2026-09-11)
+- [Fixing the multiplier did not fix the rate, 2026-09-11](#fixing-the-multiplier-did-not-fix-the-rate-2026-09-11)
 
 **Grading**
 
@@ -1080,8 +1081,55 @@ would pass while exercising nothing. The fixture is now an unambiguous pan (66.3
 assertion requires both `auto -> rife` and the warning.
 
 The fifth: the setup notes cloned mutable HEAD and asked for "a model's" files, while the
-findings name **v4.25** and the code calls `RIFE_HDv3`'s signature. Now pinned and named.
+findings name **v4.25** and the code calls `RIFE_HDv3`'s signature. The notes now name the
+version and the exact files, and carry a `git checkout` step - but the revision itself is
+still a placeholder. Recording a specific pin asserts that *that* commit is the tested
+combination, which is a claim about provenance rather than something readable off this
+machine. **The setup is named, not yet pinned**, and the placeholder is deliberate so the
+gap is visible rather than silent.
 
 **Three of my own fixes in this round initially survived a mutation sweep**, including two
 that the review had explicitly asked to be covered by tests. Writing the fix and reading the
 request is not the same as doing what it asked.
+
+## Fixing the multiplier did not fix the rate, 2026-09-11
+
+A fourth round on the same branch, and the headline finding is a direct consequence of the
+third round's fix.
+
+Deriving the RIFE multiplier from the source rate was right and incomplete. The multiplier
+only guarantees **at least** 60fps, and the trim that follows counts frames rather than
+converting rate. At 24fps the multiplier is 3, RIFE emits 72fps, and trimming to the 60fps
+frame count keeps **5/6 of the clip**:
+
+```
+15fps x4 = 60fps -> 600 frames is 10.00s of a 10s clip   100%
+24fps x3 = 72fps -> 600 frames is  8.33s of a 10s clip    83%
+30fps x2 = 60fps -> 600 frames is 10.00s of a 10s clip   100%
+```
+
+The frame-count guard passes throughout, because **the count is right and the duration is
+not**. The minterpolate branch never had this because `minterpolate=fps=60` normalises as a
+side effect; the RIFE branch had to say it, and did not. `fps=60` now sits before the trim.
+
+That is the same shape as the defect it followed. Round three fixed "the multiplier assumes
+15fps"; round four found "the trim assumes 60fps". **Fixing the input to a calculation is
+not the same as fixing the calculation**, and the second half was reachable only because
+the first half had been fixed - at a hardcoded 4, a 24fps source never got far enough to
+hit it.
+
+Two smaller findings of the same family:
+
+- `multiplier()` forced a floor of 2, so a 60fps source bought a 120fps model pass whose
+  every other frame the fps filter then discards. `interpolate()`'s loop is
+  `range(1, multi)`, so 1 was always valid - the most expensive possible way to change
+  nothing.
+- `available()` checked for files and called that availability. A venv without torch, or
+  with one built for another CUDA line, passed every file check and then failed inside the
+  model **after auto-selection had committed to RIFE**. It now runs the import in the venv
+  that will do the work. Files present is not the same as importable.
+
+And two stale claims written during the previous round: a comment describing a 400-frame
+decode cap that had been removed in the same commit, and a findings line saying the model
+revision was "pinned" when the setup notes still carry a placeholder. Both were true when
+drafted and false by the time they were committed.

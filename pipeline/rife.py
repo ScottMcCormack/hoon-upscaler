@@ -162,7 +162,11 @@ def multiplier(base_fps, target=60.0):
         raise SystemExit(f"!! cannot read a frame rate from {base_fps!r}")
     if fps <= 0:
         raise SystemExit(f"!! frame rate must be positive, got {base_fps!r}")
-    return max(2, math.ceil(target / fps))
+    # 1 is legitimate at or above the target: interpolate()'s inner loop is
+    # `for k in range(1, multi)`, so multi=1 emits the source frames and nothing else.
+    # Forcing 2 there bought a 120fps model pass whose every other frame is then dropped
+    # by the fps filter - the most expensive way to change nothing.
+    return max(1, math.ceil(target / fps))
 
 
 def available():
@@ -179,8 +183,20 @@ def available():
     # architecture file passed this friendly guard and then failed with ModuleNotFoundError
     # from inside the import - which is the failure this function exists to pre-empt.
     needed = [os.path.join(RIFE_REPO, "train_log", f)
-              for f in ("flownet.pkl", "RIFE_HDv3.py")]
-    return os.access(py, os.X_OK) and all(os.path.exists(f) for f in needed)
+              for f in ("flownet.pkl", "RIFE_HDv3.py", "IFNet_HDv3.py")]
+    if not (os.access(py, os.X_OK) and all(os.path.exists(f) for f in needed)):
+        return False
+    # Files present is not the same as importable. The venv may lack torch, or carry one
+    # built for another CUDA line - both of which surface deep inside the model instead of
+    # here, after auto-selection has already committed to RIFE. Ask the interpreter that
+    # will actually run it.
+    probe_src = ("import sys; sys.path.insert(0, %r); import torch; "
+                 "from train_log.RIFE_HDv3 import Model" % RIFE_REPO)
+    try:
+        return subprocess.run([py, "-c", probe_src], cwd=RIFE_REPO,
+                              capture_output=True, timeout=120).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def interpolate(src, dst, multi=4, scale=1.0):
@@ -297,7 +313,9 @@ def main():
         rec = "rife" if m > MOTION_THRESHOLD else "minterpolate"
         print(rec)
         # Second line only on request, so a caller needing the number for its log does not
-        # pay for a second decode of up to 400 frames. Same shape as grade.py --both.
+        # pay for a second pass over the clip - which is now the WHOLE clip, making the
+        # saving larger than when this was written against a 400-frame cap. Same shape as
+        # grade.py --both.
         if len(sys.argv) > 3 and sys.argv[3] == "--explain":
             print(f"block motion p95: {100*m:.2f}% of width, "
                   f"threshold {100*MOTION_THRESHOLD:.1f}%")

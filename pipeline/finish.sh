@@ -247,8 +247,14 @@ import sys; sys.path.insert(0,'$HERE'); import rife; sys.exit(0 if rife.availabl
   # RIFE emits (n-1)*4+1: there is nothing past the last source frame to interpolate
   # into. Same tail as minterpolate, so the same fix - clone, then trim to the count the
   # SOURCE timestamps imply rather than to whatever the render happened to produce.
+  # fps=60 before the trim, not after. RIFE emits BASE_FPS*RIFE_MULTI, which is only
+  # exactly 60 when the multiplier divides in - 24fps x3 is 72fps, and trimming 72fps
+  # material to the 60fps frame count keeps 5/6 of the clip while the frame-count guard
+  # below still passes, because the COUNT is right and the DURATION is not. The
+  # minterpolate branch gets this free from `minterpolate=fps=60`; this branch has to say
+  # it. Harmless when the rate already is 60: the filter passes frames through.
   ffmpeg -y -v error -i "$W/i60_raw.mp4" \
-    -vf "tpad=stop=8:stop_mode=clone,trim=end_frame=$EXPECT60,setpts=PTS-STARTPTS" \
+    -vf "tpad=stop=8:stop_mode=clone,fps=60,trim=end_frame=$EXPECT60,setpts=PTS-STARTPTS" \
     -c:v libx264 -preset fast -crf 12 -an "$W/i60.mp4"
 else
   ffmpeg -y -v error -i "$OUT_DIR/${TAG}_lumafix_14fps.mp4" \

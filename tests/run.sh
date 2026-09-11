@@ -697,6 +697,7 @@ if want interp; then
   printf '#!/bin/sh\nexit 0\n' > "$FAKE/venv/bin/python"
   : > "$FAKE/Practical-RIFE/train_log/flownet.pkl"
   : > "$FAKE/Practical-RIFE/train_log/RIFE_HDv3.py"
+  : > "$FAKE/Practical-RIFE/train_log/IFNet_HDv3.py"
   chmod -x "$FAKE/venv/bin/python"
   AV="$(RIFE_HOME="$FAKE" python -c "
 import os, sys
@@ -716,13 +717,38 @@ print('yes' if rife.available() else 'no')")"
   # 15fps; at 30fps it produces 120fps and the later trim to the expected 60fps frame
   # count keeps the first HALF of the clip, with every frame-count check still passing.
   MUL_BAD=""
-  for case in 15/1:4 30/1:2 24/1:3 59/4:5 60/1:2; do
+  # 60/1 -> 1: interpolate()'s loop is range(1, multi), so multi=1 emits the source frames
+  # and nothing else. Forcing 2 there bought a 120fps model pass whose every other frame
+  # the fps filter then drops.
+  for case in 15/1:4 30/1:2 24/1:3 59/4:5 60/1:1 120/1:1; do
     rate="${case%%:*}"; want="${case##*:}"
     got="$(python "$G_RIFE" multiplier "$rate" 2>/dev/null)"
     [ "$got" = "$want" ] || MUL_BAD="$MUL_BAD ${rate}->${got:-<none>}(want $want)"
   done
   [ -z "$MUL_BAD" ] && ok "interp: the frame multiplier follows the source rate" \
                     || bad "interp: the frame multiplier follows the source rate" "$MUL_BAD"
+
+  # The multiplier only guarantees AT LEAST 60fps. 24fps x3 is 72fps, and trimming 72fps
+  # material to the 60fps frame count keeps 5/6 of the clip while a frame-count check still
+  # passes — the count is right and the duration is not. This exercises the postprocess
+  # filter chain on a non-60 rate without needing CUDA or a model.
+  RAWRATE="$W/i72.mp4"
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=s=64x36:r=72:d=5" \
+    -frames:v 360 -c:v libx264 -crf 20 -pix_fmt yuv420p "$RAWRATE"
+  E60=300     # a 5s span at 60fps
+  ffmpeg -hide_banner -loglevel error -y -i "$RAWRATE" \
+    -vf "tpad=stop=8:stop_mode=clone,fps=60,trim=end_frame=$E60,setpts=PTS-STARTPTS" \
+    -c:v libx264 -preset fast -crf 18 -an "$W/i72_out.mp4"
+  OUTN="$(frame_count "$W/i72_out.mp4")"
+  OUTD="$(duration_of "$W/i72_out.mp4")"
+  OUTR="$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0 "$W/i72_out.mp4" | tr -d ',')"
+  SPAN_OK="$(python -c "print('yes' if abs($OUTD - 5.0) < 0.05 else 'no')")"
+  if [ "$OUTN" = "$E60" ] && [ "$OUTR" = "60/1" ] && [ "$SPAN_OK" = "yes" ]; then
+    ok "interp: a 72fps stream is normalised to 60fps over the full span ($OUTN frames, ${OUTD}s)"
+  else
+    bad "interp: a 72fps stream is normalised to 60fps over the full span" \
+        "$OUTN frames at $OUTR covering ${OUTD}s, wanted $E60 at 60/1 covering 5.0s"
+  fi
 
   # Motion after the first 400 frames must still count. The old default measured only the
   # opening, so a clip that is static early and pans later was recommended minterpolate -
@@ -754,6 +780,15 @@ PY
   # Model`, so weights alone are not enough: the old check looked only for flownet.pkl and
   # let a half-installed model through to fail with ModuleNotFoundError from inside the
   # import — the exact failure this guard exists to pre-empt.
+  rm -f "$FAKE/Practical-RIFE/train_log/IFNet_HDv3.py"
+  AV4="$(RIFE_HOME="$FAKE" python -c "
+import os, sys
+sys.path.insert(0, '$REPO/pipeline')
+import rife
+print('yes' if rife.available() else 'no')")"
+  assert_eq "interp: a model missing IFNet_HDv3.py counts as unavailable" "no" "$AV4"
+  : > "$FAKE/Practical-RIFE/train_log/IFNet_HDv3.py"
+
   rm -f "$FAKE/Practical-RIFE/train_log/RIFE_HDv3.py"
   AV3="$(RIFE_HOME="$FAKE" python -c "
 import os, sys
@@ -762,6 +797,25 @@ import rife
 print('yes' if rife.available() else 'no')")"
   assert_eq "interp: weights without the model code count as unavailable" "no" "$AV3"
   : > "$FAKE/Practical-RIFE/train_log/RIFE_HDv3.py"
+
+  # Files present is not the same as importable. A venv without torch — or with one built
+  # for a different CUDA line — passes every file check and then fails deep inside the
+  # model, after auto-selection has already committed to RIFE. available() asks the
+  # interpreter that will actually run it; this fixture has every file and an interpreter
+  # that cannot import.
+  BROKEN="$W/broken_rife"
+  mkdir -p "$BROKEN/venv/bin" "$BROKEN/Practical-RIFE/train_log"
+  printf '#!/bin/sh\nexit 1\n' > "$BROKEN/venv/bin/python"
+  chmod +x "$BROKEN/venv/bin/python"
+  for fpart in flownet.pkl RIFE_HDv3.py IFNet_HDv3.py; do
+    : > "$BROKEN/Practical-RIFE/train_log/$fpart"
+  done
+  AV5="$(RIFE_HOME="$BROKEN" python -c "
+import os, sys
+sys.path.insert(0, '$REPO/pipeline')
+import rife
+print('yes' if rife.available() else 'no')")"
+  assert_eq "interp: a venv that cannot import the model counts as unavailable" "no" "$AV5"
 
   # --explain must actually explain. finish.sh reads the recommendation from line 1 and the
   # measurement from line 2 of ONE call; if the second line goes missing the log silently

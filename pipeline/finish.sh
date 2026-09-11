@@ -207,8 +207,9 @@ case "$INTERP" in
   *) echo "!! unknown INTERP '$INTERP' - expected auto, minterpolate or rife"; exit 1 ;;
 esac
 if [ "$INTERP" = "auto" ]; then
-  # One call, not two. block_motion reads up to 400 frames through OpenCV, and asking
-  # separately for the recommendation and the number measured the same clip twice.
+  # One call, not two. block_motion scans the whole clip through OpenCV by default (see
+  # pipeline/rife.py), and asking separately for the recommendation and the number
+  # measured the same clip twice for no reason.
   RECO="$(python "$HERE/rife.py" recommend "$OUT_DIR/${TAG}_lumafix_14fps.mp4" --explain)"
   INTERP="$(printf '%s\n' "$RECO" | sed -n 1p)"
   echo "    auto -> $INTERP  ($(printf '%s\n' "$RECO" | sed -n 2p))"

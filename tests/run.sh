@@ -627,7 +627,8 @@ fi
 # ---------------------------------------------------------------------------
 # Interpolator selection. On a fast pan, minterpolate stretches blocks into newly revealed
 # content that has no correspondence to warp from; the 32px search window is a ruled-out
-# hypothesis rather than the cause, and block motion is selected on as a proxy. the choice between it and RIFE is made from a measurement. Only the
+# hypothesis rather than the cause, and block motion is selected on as a proxy. The
+# choice between it and RIFE is made from a measurement. Only the
 # selection and the guards are tested - running RIFE needs a CUDA torch and model
 # weights that this repo does not vendor, so the model itself is out of scope here.
 # ---------------------------------------------------------------------------

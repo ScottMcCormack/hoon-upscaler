@@ -31,6 +31,7 @@ one without listing it here fails the suite.
 - [The interpolator's blind spots were all in what it did not look at, 2026-09-11](#the-interpolators-blind-spots-were-all-in-what-it-did-not-look-at-2026-09-11)
 - [Fixing the multiplier did not fix the rate, 2026-09-11](#fixing-the-multiplier-did-not-fix-the-rate-2026-09-11)
 - [Even timestamps are not even motion, 2026-09-11](#even-timestamps-are-not-even-motion-2026-09-11)
+- [A full-branch self-review found four stale numbers no round had checked, 2026-09-11](#a-full-branch-self-review-found-four-stale-numbers-no-round-had-checked-2026-09-11)
 
 **Grading**
 
@@ -1040,10 +1041,14 @@ footage was judged **minterpolate at width 440 and rife at width 520** - the sam
 opposite answers, decided by output size rather than by motion. This pipeline renders at
 both 720p and 1080p, so it was reachable rather than theoretical.
 
-`block_motion` now returns a fraction of frame width and the threshold is 3%. That
-reproduces the original calibration exactly - N90 1.86%, MVI_0081 6.81%, threshold between
-them - while removing the dependence on render size. A test pins it: the same clip at 1x
-and 4x must pick the same interpolator, and reverting to pixels fails it.
+`block_motion` now returns a fraction of frame width and the threshold is 3%. At the time
+this landed it reproduced the original calibration exactly - N90 1.86%, MVI_0081 6.81% -
+while removing the dependence on render size. A test pins the property that matters
+(resolution independence): the same clip at 1x and 4x must pick the same interpolator, and
+reverting to pixels fails it. The two specific numbers did not stay put - see the entry
+below on scanning the whole clip, which moved both of them again, MVI_0081 by far more than
+N90. The pinned property held throughout; the two calibration figures quoted here did not,
+which is exactly why the test asserts the property and not the numbers.
 
 The general point is one this project keeps meeting from new angles. **A measurement needs
 its units and its baseline recorded, or it is an anecdote.** "39px" is not a fact about a
@@ -1054,11 +1059,16 @@ clip; it is a fact about a clip at a resolution, and the resolution was the part
 A third review round on the RIFE branch. Five findings, and four of them share a shape:
 something was checked over a subset, and the subset was not stated.
 
-**Motion was measured over the first 400 frames only** - 27% of the N90 clip. A clip that
-is static early and pans later could not influence its own recommendation, which is exactly
-the footage the tool exists to catch. Measuring everything costs 1.1s against 0.5s on 1480
-frames, and the answer moved (1.86% -> 1.94%), so even the calibration clip was not
-represented by its opening. A fixture that pans only after frame 400 now pins it: the whole
+**Motion was measured over the first 400 frames only** - 27% of the N90 clip, and 47% of
+MVI_0081's 852. A clip that is static early and pans later could not influence its own
+recommendation, which is exactly the footage the tool exists to catch. Measuring everything
+costs 1.1s against 0.5s on 1480 frames, and the answer moved on both calibration clips - N90
+1.86% -> 1.94%, a small shift, and MVI_0081 6.81% -> 5.58%, a much larger one, only found
+later during a full self-review of the branch because nothing had re-measured the second
+clip at the time this landed. Neither shift crosses the 3% threshold, so `pick()`'s
+decision on either clip is unchanged; what moved was the documented calibration figures,
+which sat wrong in four files (this one included) until that self-review caught it. A
+fixture that pans only after frame 400 now pins the first-400-frames blind spot: the whole
 clip says rife, the first 400 frames say minterpolate.
 
 **`available()` checked the weights but not the model code.** `interpolate()` does
@@ -1176,3 +1186,33 @@ the cause. The cause is occlusion: ~8% of the frame width is newly revealed each
 nothing to warp from. Block motion remains the selection criterion because it is a good
 *proxy* - both follow from fast panning - and that is now what the text says. The review
 named four locations; there were six.
+
+## A full-branch self-review found four stale numbers no round had checked, 2026-09-11
+
+After six Copilot review rounds and a CI pass, PR #8 sat at zero unresolved threads. That
+is not the same as every claim in it being true, and it was not: a holistic re-read of the
+whole accumulated diff - the first time all eight commits were read together rather than
+one round's worth at a time - found the calibration figures for MVI_0081 were wrong in
+every file that quoted them.
+
+**Live-measuring the two calibration clips right now gives N90 1.94%, MVI_0081 5.58%.**
+Four files said something else: the module docstring and the `MOTION_THRESHOLD` comment in
+`pipeline/rife.py`, `CLAUDE.md`, and `README.md` all still quoted N90 1.86% and MVI_0081
+6.81% (or 6.82%, the two did not even agree with each other) - the numbers from before the
+round-3 fix that made `block_motion` scan the whole clip instead of the first 400 frames.
+That round's own findings.md entry documented the N90 side moving (1.86% -> 1.94%) and never
+checked whether MVI_0081 moved too. It had, by far more (6.81% -> 5.58%), and nothing
+caught it because no later round re-ran the measurement against the current code - each
+treated the earlier round's numbers as ground truth and reasoned about the diff rather than
+about the clips.
+
+Neither shift crosses `MOTION_THRESHOLD` (3%), so no decision made by the code was ever
+wrong - `pick()` chooses correctly on both clips throughout. What was wrong is confined to
+prose that nobody re-verified after the code it described had changed underneath it.
+
+**The general lesson: a number that is correct when written and never re-checked becomes,
+silently, a number that is merely remembered.** Six review rounds each verified the *diff*
+against the *previous* round's claims. None re-derived a claim from the file it was
+supposedly describing. The fix here was mechanical once looked for - `grep` for the two old
+figures found all four locations in under a second - the missing step was deciding to look,
+which took a full read of the branch as one piece rather than as six sequential patches.

@@ -6,8 +6,8 @@ WHY THIS EXISTS
 `minterpolate` searches for each block's motion within `search_param` pixels, default 32.
 That was never sized against footage that pans. Measured per-frame block motion:
 
-    N90 clip (minterpolate fine)      p95  1.86% of frame width
-    MVI_0081, Canon (glassy)          p95  6.81% of frame width
+    N90 clip (minterpolate fine)      p95  1.94% of frame width
+    MVI_0081, Canon (glassy)          p95  5.58% of frame width
 
 Measured on the sources themselves, and as a fraction because the pixel figure depends on
 what resolution you measure at - see MOTION_THRESHOLD.
@@ -75,9 +75,11 @@ import sys
 # different answer, decided by the output size rather than by the motion. This pipeline
 # renders at 720p or 1080p, so that was reachable, not theoretical.
 #
-# 3% sits between the two clips that calibrated it, measured at their own widths:
-#     N90 clip (minterpolate fine)   5.8px / 312  = 1.86%
-#     MVI_0081 (glassy)             20.2px / 296  = 6.82%
+# 3% sits between the two clips that calibrated it, measured on the full clips - this
+# scans every frame (see block_motion), not a short segment, and reproduces the same
+# numbers reported in the module docstring above:
+#     N90 clip (minterpolate fine)   1.94% p95, full 1480-frame clip
+#     MVI_0081 (glassy)              5.58% p95, full 852-frame clip
 # The earlier "39px and 130px" figures are the same two clips measured on their upscaled
 # deliverables (~2000px wide), which is why they could not be reproduced from the sources
 # the docstring named. As fractions they agree with the numbers above.

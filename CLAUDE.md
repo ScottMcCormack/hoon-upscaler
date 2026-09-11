@@ -94,8 +94,8 @@ computed where the effect should not appear — catches most of it.
   block compensation stretches neighbours into it and the picture flows rather than moves.
   The search window is a ruled-out hypothesis, not the cause — at `search_param` 250, zero
   frames were beyond range and the output was still glassy. Block motion is selected on as
-  a *proxy* for fast panning: fine at 1.86% of frame width p95 (N90), glassy at 6.81%
-  (MVI_0081). Measured as a FRACTION, because block motion in pixels scales with
+  a *proxy* for fast panning: fine at 1.94% of frame width p95 (N90), glassy at 5.58%
+  (MVI_0081), both measured over the full clip. Measured as a FRACTION, because block motion in pixels scales with
   resolution and an absolute threshold judged the same footage differently at 720p and
   1080p. `finish.sh` picks by measurement;
   RIFE handles the fast case. Neither fixes baked-in motion blur, which is a reason to

@@ -102,7 +102,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # the still-relative sys.path entry gets re-resolved against the POST-chdir cwd at
 # import time, doubling the path the same way. Normalising once here, before either code
 # path can see the raw value, removes both failure modes instead of patching each one.
-RIFE_HOME = os.path.abspath(os.environ.get("RIFE_HOME", os.path.join(HERE, "..", "work", "rife")))
+#
+# `.get("RIFE_HOME", default)` only falls back when the key is ABSENT - RIFE_HOME=""
+# would resolve here to abspath("") (the cwd at import time), while finish.sh's
+# `${RIFE_HOME:-default}` treats that same empty value as unset and falls back to the
+# default path. The two sides of the pipeline would then probe and run two different
+# installations. `or` falls back on any falsy value, matching bash's `:-` instead.
+RIFE_HOME = os.path.abspath(os.environ.get("RIFE_HOME") or os.path.join(HERE, "..", "work", "rife"))
 RIFE_REPO = os.path.join(RIFE_HOME, "Practical-RIFE")
 
 

@@ -835,6 +835,20 @@ PY
   AV5="$(rife_available "$BROKEN")"
   assert_eq "interp: a venv that cannot import the model counts as unavailable" "no" "$AV5"
 
+  # RIFE_HOME="" must resolve the same way rife.py's own bash caller resolves it.
+  # finish.sh reads it as `${RIFE_HOME:-default}`, which treats an explicitly empty value
+  # as unset. `os.environ.get("RIFE_HOME", default)` does not - it only substitutes the
+  # default when the key is ABSENT, so an empty string used to resolve to abspath(""),
+  # the cwd at import time, while finish.sh kept using the real default path. The two
+  # halves of the pipeline would then probe and run two different installations.
+  EMPTYHOME="$(RIFE_HOME="" python -c "
+import sys
+sys.path.insert(0, '$REPO/pipeline')
+import rife
+print(rife.RIFE_HOME)")"
+  assert_eq "interp: an explicitly empty RIFE_HOME resolves to the same default as unset" \
+    "$REPO/work/rife" "$EMPTYHOME"
+
   # --explain must actually explain. finish.sh reads the recommendation from line 1 and the
   # measurement from line 2 of ONE call; if the second line goes missing the log silently
   # loses the number that justified the choice.

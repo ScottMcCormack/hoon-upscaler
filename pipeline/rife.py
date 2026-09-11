@@ -12,10 +12,9 @@ That was never sized against footage that pans. Measured per-frame block motion:
 Measured on the sources themselves, and as a fraction because the pixel figure depends on
 what resolution you measure at - see MOTION_THRESHOLD.
 
-On the deliverable that is ~130px, well outside the 32px window the estimator can look in,
-so it returns a
-wrong one and the compensation warps the picture along it. The result reads as the frame
-flowing rather than moving.
+On the 1080p deliverable that is ~130px — well outside the 32px window the estimator can
+look in — so it returns a wrong vector and the compensation warps the picture along it.
+The result reads as the frame flowing rather than moving.
 
 Raising `search_param` does not fix it. At 250 the measurement says ZERO frames are beyond
 range and it is still glassy, which rules the search range out as the mechanism. What
@@ -47,7 +46,10 @@ SETUP (not automated - it needs a CUDA torch and a model this repo will not vend
 
 Point RIFE_HOME elsewhere if you put it somewhere else.
 
-  rife.py measure <video>                         report motion, recommend an interpolator
+  rife.py measure <video>                         report motion and the recommendation
+  rife.py recommend <video> [--explain]           the recommendation, optionally with why
+  rife.py multiplier <base_fps>                   frames per source frame to reach 60fps
+  rife.py why                                     whether RIFE can run here, and if not why
   rife.py interpolate <in> <out> [multi] [scale]  interpolate
 """
 import os
@@ -169,34 +171,48 @@ def multiplier(base_fps, target=60.0):
     return max(1, math.ceil(target / fps))
 
 
-def available():
-    """Whether RIFE can actually be RUN, not merely whether its files are present.
+def unavailable_reason():
+    """Why RIFE cannot run here, or None if it can.
 
-    os.access(X_OK) rather than exists(): finish.sh invokes the venv interpreter directly,
-    so a present-but-not-executable python passed this check and then fell through to the
-    system python - which has no torch, or a different one. The check and the invocation
-    have to ask the same question.
+    Three distinct failures, and they want different messages: files missing, a venv that
+    cannot import what interpolate() imports, and a runtime that imports but cannot
+    compute. The third is not hypothetical here - CLAUDE.md records that this machine's
+    RTX 5060 Ti is Blackwell (sm_120) and that stock torch builds carry no kernels for it,
+    so `import torch` succeeds and the first real op fails. A CPU-only box is the same
+    shape: importable, and hours per clip rather than minutes.
+
+    Checking it here rather than at inference is the whole point. Auto-selection commits
+    to RIFE on the strength of this answer, and the fallback it is choosing between only
+    exists before the expensive stage starts.
     """
     py = os.path.join(RIFE_HOME, "venv", "bin", "python")
-    # Everything interpolate() actually needs, not just the weights. It does
-    # `from train_log.RIFE_HDv3 import Model`, so a setup carrying flownet.pkl without the
-    # architecture file passed this friendly guard and then failed with ModuleNotFoundError
-    # from inside the import - which is the failure this function exists to pre-empt.
-    needed = [os.path.join(RIFE_REPO, "train_log", f)
-              for f in ("flownet.pkl", "RIFE_HDv3.py", "IFNet_HDv3.py")]
-    if not (os.access(py, os.X_OK) and all(os.path.exists(f) for f in needed)):
-        return False
-    # Files present is not the same as importable. The venv may lack torch, or carry one
-    # built for another CUDA line - both of which surface deep inside the model instead of
-    # here, after auto-selection has already committed to RIFE. Ask the interpreter that
-    # will actually run it.
-    probe_src = ("import sys; sys.path.insert(0, %r); import torch; "
-                 "from train_log.RIFE_HDv3 import Model" % RIFE_REPO)
+    if not os.access(py, os.X_OK):
+        return f"no executable interpreter at {py}"
+    for fname in ("flownet.pkl", "RIFE_HDv3.py", "IFNet_HDv3.py"):
+        f = os.path.join(RIFE_REPO, "train_log", fname)
+        if not os.path.exists(f):
+            return f"model file missing: {f}"
+    probe_src = (
+        "import sys; sys.path.insert(0, %r)\n"
+        "import torch\n"
+        "from train_log.RIFE_HDv3 import Model\n"
+        "assert torch.cuda.is_available(), 'no CUDA device'\n"
+        # A kernel launch, not just a device count. This is what distinguishes a usable
+        # build from one that reports a device and has no kernels for its architecture.
+        "torch.ones(8, device='cuda').sum().item()\n" % RIFE_REPO)
     try:
-        return subprocess.run([py, "-c", probe_src], cwd=RIFE_REPO,
-                              capture_output=True, timeout=120).returncode == 0
-    except (OSError, subprocess.SubprocessError):
-        return False
+        p = subprocess.run([py, "-c", probe_src], cwd=RIFE_REPO,
+                           capture_output=True, text=True, timeout=180)
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"could not run {py}: {e}"
+    if p.returncode != 0:
+        last = (p.stderr or "").strip().splitlines()
+        return f"venv cannot run the model: {last[-1] if last else 'unknown error'}"
+    return None
+
+
+def available():
+    return unavailable_reason() is None
 
 
 def interpolate(src, dst, multi=4, scale=1.0):
@@ -300,7 +316,9 @@ def interpolate(src, dst, multi=4, scale=1.0):
 
 
 def main():
-    if len(sys.argv) < 3:
+    # `why` is the one command that takes no argument, so the arity check cannot be a
+    # single threshold — it printed the whole docstring instead of answering.
+    if len(sys.argv) < 2 or (len(sys.argv) < 3 and sys.argv[1] != "why"):
         raise SystemExit(__doc__)
     cmd = sys.argv[1]
     if cmd == "measure":
@@ -319,6 +337,10 @@ def main():
         if len(sys.argv) > 3 and sys.argv[3] == "--explain":
             print(f"block motion p95: {100*m:.2f}% of width, "
                   f"threshold {100*MOTION_THRESHOLD:.1f}%")
+    elif cmd == "why":
+        why = unavailable_reason()
+        print(why or "available")
+        sys.exit(0 if why is None else 1)
     elif cmd == "multiplier":
         print(multiplier(sys.argv[2]))
     elif cmd == "interpolate":

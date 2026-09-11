@@ -212,11 +212,20 @@ if [ "$INTERP" = "auto" ]; then
   RECO="$(python "$HERE/rife.py" recommend "$OUT_DIR/${TAG}_lumafix_14fps.mp4" --explain)"
   INTERP="$(printf '%s\n' "$RECO" | sed -n 1p)"
   echo "    auto -> $INTERP  ($(printf '%s\n' "$RECO" | sed -n 2p))"
-  if [ "$INTERP" = "rife" ] && ! python -c "
-import sys; sys.path.insert(0,'$HERE'); import rife; sys.exit(0 if rife.available() else 1)"; then
-    echo "    !! this footage wants RIFE but it is not set up (see pipeline/rife.py)."
-    echo "       Falling back to minterpolate; expect warping through the fast passages."
-    INTERP=minterpolate
+  if [ "$INTERP" = "rife" ]; then
+    # Probed once and remembered. Each probe spawns the venv interpreter and cold-imports
+    # torch plus the model, so asking twice on the normal auto path paid that startup
+    # cost twice for an answer that cannot change in between.
+    # `&& ... || ...`, not a bare assignment. Under `set -e` a command substitution that
+    # exits nonzero kills the script, so probing an UNAVAILABLE RIFE aborted finish.sh at
+    # the exact moment the fallback existed to rescue it. Third time this trap has been
+    # written in this repo; CLAUDE.md records the other two.
+    RIFE_WHY="$(python "$HERE/rife.py" why 2>&1)" && RIFE_OK=0 || RIFE_OK=$?
+    if [ "$RIFE_OK" -ne 0 ]; then
+      echo "    !! this footage wants RIFE but it cannot run here: $RIFE_WHY"
+      echo "       Falling back to minterpolate; expect warping through the fast passages."
+      INTERP=minterpolate
+    fi
   fi
 fi
 
@@ -225,10 +234,14 @@ fi
 if [ "$INTERP" = "rife" ]; then
   # Forced, not auto-selected: refuse rather than silently producing the output the
   # caller explicitly asked not to have.
-  if ! python -c "
-import sys; sys.path.insert(0,'$HERE'); import rife; sys.exit(0 if rife.available() else 1)"; then
-    echo "!! INTERP=rife but RIFE is not set up. Expected a venv and model weights under" >&2
-    echo "   ${RIFE_HOME:-$REPO/work/rife} - see the setup notes in pipeline/rife.py." >&2
+  # Reuse the auto path's answer when it already probed; otherwise ask now.
+  if [ -z "${RIFE_OK:-}" ]; then
+    RIFE_WHY="$(python "$HERE/rife.py" why 2>&1)" && RIFE_OK=0 || RIFE_OK=$?
+  fi
+  if [ "$RIFE_OK" -ne 0 ]; then
+    echo "!! INTERP=rife but RIFE cannot run here: $RIFE_WHY" >&2
+    echo "   Expected a venv and the v4.25 model under ${RIFE_HOME:-$REPO/work/rife}," >&2
+    echo "   with a torch build whose kernels match this GPU - see pipeline/rife.py." >&2
     exit 1
   fi
   RIFE_PY="${RIFE_HOME:-$REPO/work/rife}/venv/bin/python"

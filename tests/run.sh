@@ -666,7 +666,7 @@ if want interp; then
   # Forcing rife when it is not installed must refuse, not quietly produce the output the
   # caller explicitly asked not to have.
   clean_iout; assert_stderr_matches "interp: forced rife without a setup is refused" \
-    "RIFE is not set up" \
+    "RIFE cannot run here" \
     env INTERP=rife RIFE_HOME="$W/no-such-rife" bash "$REPO/pipeline/finish.sh" "$RAW" I "$SRC" "$IOUT"
 
   # The recommendation must not depend on output size. Block motion in pixels scales with
@@ -864,7 +864,7 @@ print('yes' if rife.available() else 'no')")"
         "no deliverable: $(printf '%s' "$out" | tail -1)"
   else
     case "$out" in
-      *"auto -> rife"*"not set up"*) ok "interp: auto falls back to minterpolate when RIFE is absent" ;;
+      *"auto -> rife"*"cannot run here"*) ok "interp: auto falls back to minterpolate when RIFE is absent" ;;
       *"auto -> rife"*) bad "interp: auto falls back to minterpolate when RIFE is absent" \
              "chose rife but printed no fallback warning" ;;
       *) bad "interp: auto falls back to minterpolate when RIFE is absent" \

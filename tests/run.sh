@@ -693,13 +693,20 @@ print('yes' if rife.available() else 'no')"
   # from this cause alone, just landing both sides of the old 3% threshold so the test
   # passed by coincidence). Two independent native renders of the same pan speed - the
   # comparison real 720p/1080p footage actually is - avoid that confound entirely.
+  # Pan speed chosen for a WIDE margin from MOTION_THRESHOLD (6%), not just any speed
+  # that lands on one side. A first version measured 5.06%/5.65% - only ~1pt below
+  # threshold - and passed locally but failed in CI: a different ffmpeg/OpenCV build
+  # measures optical flow on the exact same synthetic pan slightly differently, and a
+  # ~1pt margin was not enough to survive that. This version measures ~3.1%/3.2%, roughly
+  # half the threshold, which cross-platform floating-point noise in flow estimation is
+  # not expected to close.
   RSRC="$W/ires.mp4"
   ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=s=320x240:r=15:d=4" -frames:v 40 \
-    -vf "crop=240:180:min(iw-240\,n*6):20" -c:v libx264 -crf 18 -pix_fmt yuv420p "$RSRC"
+    -vf "crop=280:210:min(iw-280\,n*1):15" -c:v libx264 -crf 18 -pix_fmt yuv420p "$RSRC"
   RSMALL="$(python "$REPO/pipeline/rife.py" recommend "$RSRC" 2>/dev/null)"
   RBIGSRC="$W/ires_big_native.mp4"
   ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=s=1280x960:r=15:d=4" -frames:v 40 \
-    -vf "crop=960:720:min(iw-960\,n*24):80" -c:v libx264 -crf 18 -pix_fmt yuv420p "$RBIGSRC"
+    -vf "crop=1120:840:min(iw-1120\,n*4):60" -c:v libx264 -crf 18 -pix_fmt yuv420p "$RBIGSRC"
   RBIG="$(python "$REPO/pipeline/rife.py" recommend "$RBIGSRC" 2>/dev/null)"
   if [ -n "$RSMALL" ] && [ "$RSMALL" = "$RBIG" ]; then
     ok "interp: the same footage picks the same interpolator at 1x and 4x ($RSMALL)"

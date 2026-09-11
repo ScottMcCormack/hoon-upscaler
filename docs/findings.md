@@ -34,6 +34,7 @@ one without listing it here fails the suite.
 - [A full-branch self-review found four stale numbers no round had checked, 2026-09-11](#a-full-branch-self-review-found-four-stale-numbers-no-round-had-checked-2026-09-11)
 - [p95 over a whole clip discards its top 5% by definition, 2026-09-11](#p95-over-a-whole-clip-discards-its-top-5-by-definition-2026-09-11)
 - [An independent high-effort review found ten more, all in code no round had touched, 2026-09-11](#an-independent-high-effort-review-found-ten-more-all-in-code-no-round-had-touched-2026-09-11)
+- [CI failed twice on a test that passed locally both times, 2026-09-11](#ci-failed-twice-on-a-test-that-passed-locally-both-times-2026-09-11)
 
 **Grading**
 
@@ -1334,3 +1335,31 @@ One shared `rife_available()` helper now takes the directory as its only argumen
 also the only thing that was actually under test at each site.
 
 108 tests, all fixes mutation-verified.
+
+## CI failed twice on a test that passed locally both times, 2026-09-11
+
+The resolution-independence fixture from an earlier round measured 5.06%/5.65% against
+the 6% threshold - under a point of margin on the low side, barely a third of a point on
+the high side. It passed on this machine. It failed on GitHub's runner, twice, on two
+separate commits: `1x said minterpolate, 4x said rife`.
+
+**Same synthetic clip, same code, different answer, because a different ffmpeg/OpenCV
+build measures optical flow on it slightly differently.** Nothing here is non-deterministic
+in the sense the project usually means - SeedVR2's determinism claims are about repeat
+runs on identical hardware. This is smaller and more mundane: floating-point results from
+`calcOpticalFlowFarneback` are not bit-identical across builds, and a fixture measured
+within a point of its own threshold has no room to absorb that.
+
+The fixture is not a real render - real footage is never compared 1x against a scaled copy
+of itself, and no production decision runs this close to the line by construction. Widened
+the margin instead of chasing bit-for-bit reproducibility: the same pan, slowed down, now
+measures ~3.1%/3.2%, roughly half the threshold rather than a hair's width from it. Every
+other block_motion fixture in the suite was checked against the same standard - all carry
+at least 4 points of margin, most far more (the tightest of the rest is 4.09 points; most
+exceed 10).
+
+**The general rule, which the project's own standard already implies but had not been
+applied to a threshold-adjacent test until this:** a test asserting which side of a
+threshold a continuous measurement lands on needs margin proportional to the measurement's
+own noise floor, not just enough margin to pass once, in one place, on one machine. CI
+finding this is exactly what CI is for.

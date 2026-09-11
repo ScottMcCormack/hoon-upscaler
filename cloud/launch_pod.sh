@@ -24,6 +24,19 @@
 # ============================================================================
 set -euo pipefail
 
+# This wrapper calls run_on_pod.sh, which has its own empty-argument and extra-argument
+# guards - but those run on the POD, after money is already being spent renting it. The
+# same ambiguities are worth refusing here too: an explicitly empty "$1" would otherwise
+# default to 720 exactly like `${1:-720}` did in run_on_pod.sh before that was fixed, and
+# `launch_pod.sh "" full` would rent a 720p full-render pod at a resolution nobody chose.
+[ "$#" -le 2 ] || { echo "!! unexpected extra argument(s): ${*:3}"; exit 1; }
+if [ "$#" -ge 1 ] && [ -z "${1:-}" ]; then
+  echo "!! resolution was given but empty. Pass a resolution explicitly, e.g. 720."; exit 1
+fi
+if [ "$#" -ge 2 ] && [ -z "${2:-}" ]; then
+  echo "!! mode was given but empty. Pass 'test' or 'full' explicitly."; exit 1
+fi
+
 RES="${1:-720}"
 MODE="${2:-test}"     # deliberately NOT 'full' — the default here should be the cheap one
 GPU="${GPU:-NVIDIA A40}"
@@ -39,6 +52,16 @@ case "$MODE" in
   test) IN="$REPO/cloud/test_15s.mp4";  OUT_BASE="sr_test_${RES}" ;;
   full) IN="$REPO/input/full_169.mp4"; OUT_BASE="sr_out_${RES}"  ;;
 esac
+
+# Nonce-backed, not just OUT_BASE. The name was deterministic (hoon-sr_test_720 every
+# time), and the by-name cleanup fallback below matches on it alone - so a second launch
+# with the same RES/MODE running concurrently, or this cleanup running after `create pod`
+# failed but left an orphan under that name from an EARLIER run, would delete a pod this
+# invocation did not create. That directly breaks the "terminates ONLY the pod this script
+# created" guarantee stated at the top. The nonce makes the name unique per launch while
+# keeping the by-name fallback - which exists because POD_ID can be lost, see below -
+# restricted to exactly this invocation.
+POD_NAME="hoon-${OUT_BASE}-$$-$(date +%s)"
 [ -f "$IN" ] || { echo "!! input not found: $IN"; exit 1; }
 command -v runpodctl >/dev/null || { echo "!! runpodctl not on PATH"; exit 1; }
 runpodctl pod list >/dev/null 2>&1 || {
@@ -66,12 +89,12 @@ cleanup() {
   # anything left behind under our name in case the id was never parsed. A pod that
   # survives this is the only failure here that costs real money.
   local left
-  left="$(runpodctl pod list -o json 2>/dev/null | grep -o "hoon-${OUT_BASE}" | head -1 || true)"
+  left="$(runpodctl pod list -o json 2>/dev/null | grep -o "$POD_NAME" | head -1 || true)"
   if [ -n "$left" ]; then
-    echo "!! a pod named hoon-${OUT_BASE} is still listed — removing by name"
-    runpodctl remove pods "hoon-${OUT_BASE}" >/dev/null 2>&1 || true
+    echo "!! a pod named $POD_NAME is still listed — removing by name"
+    runpodctl remove pods "$POD_NAME" >/dev/null 2>&1 || true
     sleep 5
-    if runpodctl pod list -o json 2>/dev/null | grep -q "hoon-${OUT_BASE}"; then
+    if runpodctl pod list -o json 2>/dev/null | grep -q "$POD_NAME"; then
       echo "!! TERMINATION FAILED — a pod is STILL BILLING."
       echo "!! Terminate it now:  runpodctl pod delete ${POD_ID:-<id from runpodctl pod list>}"
       echo "!! Pod id, if known, is in $STATE"
@@ -92,7 +115,7 @@ T0=$(date +%s)
 
 say "renting $GPU for ${RES}p ${MODE}  (ceiling ${MAX_MIN}min)"
 CREATE="$(runpodctl create pod \
-  --name "hoon-${OUT_BASE}" \
+  --name "$POD_NAME" \
   --gpuType "$GPU" \
   --imageName "$IMAGE" \
   --containerDiskSize 60 \
@@ -131,7 +154,7 @@ if m: print(m.group(1))
   # pod may well exist and be billing under a name we can still find.
   echo "$CREATE"
   echo "!! could not parse a pod id from the creation response."
-  echo "!! CHECK FOR AN ORPHAN: runpodctl pod list   (look for hoon-${OUT_BASE})"
+  echo "!! CHECK FOR AN ORPHAN: runpodctl pod list   (look for $POD_NAME)"
   exit 1
 }
 echo "$POD_ID" > "$STATE"
@@ -176,14 +199,29 @@ SSHO=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ER
 [ -f "$HOME/.runpod/ssh/runpodctl-ssh-key" ] && SSHO+=(-i "$HOME/.runpod/ssh/runpodctl-ssh-key") || true
 rsh() { ssh "${SSHO[@]}" -p "$SSH_PORT" "root@$SSH_HOST" "$@"; }
 
+# A bare `scp` under set -e turns one transient network blip into an immediate script
+# exit, which - via the unconditional EXIT trap - deletes the pod. That is fine for the
+# uploads (nothing unique exists there yet, retrying the whole script is cheap) but
+# would be a real loss for the downloads: the render is complete and verified on the pod
+# and a failed scp would destroy the only place that survives once the pod is gone.
+scp_retry() {  # same args as scp
+  local n=0 max=4 delay=10
+  until scp "${SSHO[@]}" -P "$SSH_PORT" "$@"; do
+    n=$((n + 1))
+    [ "$n" -ge "$max" ] && return 1
+    echo "  scp attempt $n failed, retrying in ${delay}s..." >&2
+    sleep "$delay"
+  done
+}
+
 for _ in $(seq 1 30); do rsh true 2>/dev/null && break; sleep 10; done
 rsh true || { echo "!! SSH did not accept a command"; exit 1; }
 
 # --- upload -----------------------------------------------------------------
 say "uploading input and runner"
 rsh 'mkdir -p /workspace/cloud'
-scp "${SSHO[@]}" -P "$SSH_PORT" "$IN" "root@$SSH_HOST:/workspace/cloud/$(basename "$IN")"
-scp "${SSHO[@]}" -P "$SSH_PORT" "$REPO/cloud/run_on_pod.sh" "root@$SSH_HOST:/workspace/cloud/run_on_pod.sh"
+scp_retry "$IN" "root@$SSH_HOST:/workspace/cloud/$(basename "$IN")"
+scp_retry "$REPO/cloud/run_on_pod.sh" "root@$SSH_HOST:/workspace/cloud/run_on_pod.sh"
 
 # --- render -----------------------------------------------------------------
 # Detached on the pod so the SSH session is not the thing keeping it alive: a dropped
@@ -194,8 +232,27 @@ ENVS=""
 [ -n "${TEMPORAL_OVERLAP:-}" ] && ENVS="$ENVS TEMPORAL_OVERLAP=$TEMPORAL_OVERLAP" || true
 [ -n "$ENVS" ] && echo "overrides:$ENVS" || true
 
-rsh "cd /workspace/cloud && rm -f ${OUT_BASE}.mp4 ${OUT_BASE}.json render.log && \
-     nohup env$ENVS bash run_on_pod.sh $RES $MODE > render.log 2>&1 < /dev/null & echo started"
+# Capture $! so liveness can be checked by PID rather than by matching a command line.
+# `pgrep -f "bash run_on_pod.sh"` was tried first and always reports alive, even with
+# nothing running: the remote shell sshd spawns to run the pgrep command itself has that
+# exact string in ITS OWN command line (it is right there in the quoted pattern), so
+# `-f` matches the checker, not the checked. Reproduced locally: `bash -c 'pgrep -f
+# "bash run_on_pod.sh" >/dev/null; echo $?'` prints 0 with no such process anywhere.
+# docs/findings.md already records this exact self-match trap from a different script.
+#
+# The setup (cd, rm) and the backgrounded launch are deliberately SEPARATE statements,
+# not chained with && into one backgrounded job. `A && B & echo $!` backgrounds the
+# whole "A && B" as a subshell and $! captures THAT subshell's PID, not B's - confirmed
+# locally: `cd /tmp && sleep N &` left $! pointing at a wrapper process whose child (a
+# different PID) was the actual sleep. `kill -0` on the wrapper can behave differently
+# from the real process's lifetime depending on shell/job-control internals neither this
+# script nor the pod's shell should be trusted to pin down. Backgrounding the render
+# command on its own line makes $! its PID directly, with nothing in between.
+RENDER_PID="$(rsh "cd /workspace/cloud
+rm -f ${OUT_BASE}.mp4 ${OUT_BASE}.json render.log
+nohup env$ENVS bash run_on_pod.sh $RES $MODE > render.log 2>&1 < /dev/null &
+echo \$!")"
+[ -n "$RENDER_PID" ] || { echo "!! could not capture the render's PID"; exit 1; }
 
 # --- poll for the manifest --------------------------------------------------
 # The manifest is written last, after the frame check passes, so its existence means
@@ -207,7 +264,7 @@ DONE=0
 while [ $(( ($(date +%s) - T0) / 60 )) -lt "$MAX_MIN" ]; do
   if rsh "test -f $MAN" 2>/dev/null; then DONE=1; break; fi
   # A dead process with no manifest means it failed; stop paying to poll a corpse.
-  if ! rsh 'pgrep -f "bash run_on_pod.sh" >/dev/null' 2>/dev/null; then
+  if ! rsh "kill -0 $RENDER_PID" 2>/dev/null; then
     sleep 5
     if rsh "test -f $MAN" 2>/dev/null; then DONE=1; break; fi
     say "the render exited without writing a manifest — last 40 lines"
@@ -222,13 +279,31 @@ done
   rsh 'tail -20 /workspace/cloud/render.log' 2>/dev/null || true; exit 1; }
 
 say "render complete after $(elapsed) — downloading before anything else"
-scp "${SSHO[@]}" -P "$SSH_PORT" "root@$SSH_HOST:$MAN" "$DEST/${OUT_BASE}.json"
-scp "${SSHO[@]}" -P "$SSH_PORT" "root@$SSH_HOST:/workspace/cloud/${OUT_BASE}.mp4" "$DEST/${OUT_BASE}.mp4"
+# On exhausted retries here, do NOT let the EXIT trap tear the pod down: the render is
+# the only complete copy until the download and verification below both succeed, and
+# destroying it over a transient network failure is a worse outcome than an idle pod the
+# operator has to terminate by hand. `trap - EXIT INT TERM` clears the trap so plain
+# `exit 1` does not invoke cleanup(); the pod id and manual recovery commands are printed
+# instead.
+if ! scp_retry "root@$SSH_HOST:$MAN" "$DEST/${OUT_BASE}.json" \
+   || ! scp_retry "root@$SSH_HOST:/workspace/cloud/${OUT_BASE}.mp4" "$DEST/${OUT_BASE}.mp4"; then
+  say "download failed after retries — leaving the pod running for manual recovery"
+  echo "!! pod $POD_ID ($POD_NAME) still has the only complete copy of this render." >&2
+  echo "!! Retry the download by hand:" >&2
+  echo "!!   scp -P $SSH_PORT root@$SSH_HOST:$MAN $DEST/" >&2
+  echo "!!   scp -P $SSH_PORT root@$SSH_HOST:/workspace/cloud/${OUT_BASE}.mp4 $DEST/" >&2
+  echo "!! Terminate it yourself when you are done:  runpodctl pod delete $POD_ID" >&2
+  trap - EXIT INT TERM
+  exit 1
+fi
 
 # Verify against the manifest the pod itself wrote, before the pod is gone: a truncated
 # transfer is indistinguishable from a truncated render once the evidence is deleted.
+# Same reasoning as the retries above: a hash mismatch means the LOCAL copy is bad, not
+# necessarily the render, so it is not evidence the pod's copy is bad too - leave the pod
+# up rather than destroy the one place a clean copy is known to exist.
 say "verifying transfer"
-python3 - "$DEST/${OUT_BASE}.json" "$DEST/${OUT_BASE}.mp4" <<'PY'
+if ! python3 - "$DEST/${OUT_BASE}.json" "$DEST/${OUT_BASE}.mp4" <<'PY'
 import hashlib, json, sys
 man, mp4 = sys.argv[1], sys.argv[2]
 m = json.load(open(man))
@@ -245,6 +320,16 @@ if got != want:
     sys.exit("!! TRANSFER CORRUPT — downloaded file does not match the manifest")
 print("  transfer verified")
 PY
+then
+  echo "!! pod $POD_ID ($POD_NAME) is being left running - the LOCAL copy is bad, not" >&2
+  echo "!! necessarily the pod's, so retry the download by hand before assuming the" >&2
+  echo "!! render itself is broken:" >&2
+  echo "!!   scp -P $SSH_PORT root@$SSH_HOST:$MAN $DEST/" >&2
+  echo "!!   scp -P $SSH_PORT root@$SSH_HOST:/workspace/cloud/${OUT_BASE}.mp4 $DEST/" >&2
+  echo "!! Terminate it yourself when you are done:  runpodctl pod delete $POD_ID" >&2
+  trap - EXIT INT TERM
+  exit 1
+fi
 
 say "done in $(elapsed): $DEST/${OUT_BASE}.mp4"
 # EXIT trap terminates the pod from here.

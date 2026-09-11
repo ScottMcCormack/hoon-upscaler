@@ -36,7 +36,14 @@ SETUP (not automated - it needs a CUDA torch and a model this repo will not vend
     work/rife/venv/bin/pip install torch torchvision --index-url \\
         https://download.pytorch.org/whl/cu130      # cu130 for Blackwell; see CLAUDE.md
     git clone https://github.com/hzwer/Practical-RIFE.git work/rife/Practical-RIFE
-    # then put a model's train_log/ (flownet.pkl + *.py) in work/rife/Practical-RIFE/
+    cd work/rife/Practical-RIFE && git checkout <pin a revision>   # HEAD is mutable
+
+    # Then install the model this pipeline was tested against: RIFE v4.25, whose train_log/
+    # carries flownet.pkl plus RIFE_HDv3.py and IFNet_HDv3.py. The version matters - the
+    # repo publishes several models with different inference signatures, and this code
+    # calls RIFE_HDv3's. A different model may import cleanly and then behave differently,
+    # or fail inside the flow blocks a long way from the cause.
+    #   work/rife/Practical-RIFE/train_log/{flownet.pkl,RIFE_HDv3.py,IFNet_HDv3.py}
 
 Point RIFE_HOME elsewhere if you put it somewhere else.
 
@@ -99,7 +106,7 @@ def pad_to(scale):
     return max(128, int(128 / scale))
 
 
-def block_motion(path, sample=400):
+def block_motion(path, sample=None):
     """p95 of per-frame p99 block motion, as a FRACTION of frame width.
 
     Normalised deliberately - see MOTION_THRESHOLD. The pixel figure is resolution
@@ -111,9 +118,15 @@ def block_motion(path, sample=400):
     """
     import cv2
     import numpy as np
+    # Whole clip by default. The old default of 400 frames covered 27% of the N90 clip -
+    # a clip that is static early and pans later could never influence the recommendation,
+    # which is precisely the case this tool exists to catch. It is also not free of cost
+    # to be wrong here and it is nearly free to be right: 1.1s against 0.5s on 1480 frames,
+    # and the answer moved (1.86% -> 1.94%), so even the calibration clip was not
+    # represented by its opening.
     cap = cv2.VideoCapture(path)
     prev, vals, n, width = None, [], 0, 0
-    while n < sample:
+    while sample is None or n < sample:
         ok, f = cap.read()
         if not ok:
             break
@@ -133,6 +146,25 @@ def block_motion(path, sample=400):
     return float(np.percentile(vals, 95)) / width
 
 
+def multiplier(base_fps, target=60.0):
+    """How many RIFE frames per source frame, to reach at least `target` fps.
+
+    Lives here rather than inline in finish.sh so it can be tested without a GPU. The
+    value used to be hardcoded to 4, which is right only for a 15fps source: at 30fps that
+    produces 120fps, and trimming to the expected 60fps frame count then keeps the first
+    half of the clip while every frame-count check still passes.
+    """
+    import math
+    n, _, d = str(base_fps).partition("/")
+    try:
+        fps = float(n) / float(d or 1)
+    except ValueError:
+        raise SystemExit(f"!! cannot read a frame rate from {base_fps!r}")
+    if fps <= 0:
+        raise SystemExit(f"!! frame rate must be positive, got {base_fps!r}")
+    return max(2, math.ceil(target / fps))
+
+
 def available():
     """Whether RIFE can actually be RUN, not merely whether its files are present.
 
@@ -142,8 +174,13 @@ def available():
     have to ask the same question.
     """
     py = os.path.join(RIFE_HOME, "venv", "bin", "python")
-    weights = os.path.join(RIFE_REPO, "train_log", "flownet.pkl")
-    return os.access(py, os.X_OK) and os.path.exists(weights)
+    # Everything interpolate() actually needs, not just the weights. It does
+    # `from train_log.RIFE_HDv3 import Model`, so a setup carrying flownet.pkl without the
+    # architecture file passed this friendly guard and then failed with ModuleNotFoundError
+    # from inside the import - which is the failure this function exists to pre-empt.
+    needed = [os.path.join(RIFE_REPO, "train_log", f)
+              for f in ("flownet.pkl", "RIFE_HDv3.py")]
+    return os.access(py, os.X_OK) and all(os.path.exists(f) for f in needed)
 
 
 def interpolate(src, dst, multi=4, scale=1.0):
@@ -264,6 +301,8 @@ def main():
         if len(sys.argv) > 3 and sys.argv[3] == "--explain":
             print(f"block motion p95: {100*m:.2f}% of width, "
                   f"threshold {100*MOTION_THRESHOLD:.1f}%")
+    elif cmd == "multiplier":
+        print(multiplier(sys.argv[2]))
     elif cmd == "interpolate":
         if len(sys.argv) < 4:
             raise SystemExit("usage: rife.py interpolate <in> <out> [multi] [scale]")

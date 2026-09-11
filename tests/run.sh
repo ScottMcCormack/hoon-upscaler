@@ -634,7 +634,7 @@ echo
 echo "interpolation"
 
 if want interp; then
-  R="$REPO/pipeline/rife.py"
+  R="$REPO/pipeline/rife.py"; G_RIFE="$R"
 
   # The padding multiple is derived from scale, not from the network stride. Getting it
   # wrong fails deep inside the flow blocks, so it is worth pinning.
@@ -696,6 +696,7 @@ if want interp; then
   mkdir -p "$FAKE/venv/bin" "$FAKE/Practical-RIFE/train_log"
   printf '#!/bin/sh\nexit 0\n' > "$FAKE/venv/bin/python"
   : > "$FAKE/Practical-RIFE/train_log/flownet.pkl"
+  : > "$FAKE/Practical-RIFE/train_log/RIFE_HDv3.py"
   chmod -x "$FAKE/venv/bin/python"
   AV="$(RIFE_HOME="$FAKE" python -c "
 import os, sys
@@ -710,6 +711,57 @@ sys.path.insert(0, '$REPO/pipeline')
 import rife
 print('yes' if rife.available() else 'no')")"
   assert_eq "interp: an executable venv python counts as available" "yes" "$AV2"
+
+  # The RIFE multiplier must come from the source rate. Hardcoded 4 is right only at
+  # 15fps; at 30fps it produces 120fps and the later trim to the expected 60fps frame
+  # count keeps the first HALF of the clip, with every frame-count check still passing.
+  MUL_BAD=""
+  for case in 15/1:4 30/1:2 24/1:3 59/4:5 60/1:2; do
+    rate="${case%%:*}"; want="${case##*:}"
+    got="$(python "$G_RIFE" multiplier "$rate" 2>/dev/null)"
+    [ "$got" = "$want" ] || MUL_BAD="$MUL_BAD ${rate}->${got:-<none>}(want $want)"
+  done
+  [ -z "$MUL_BAD" ] && ok "interp: the frame multiplier follows the source rate" \
+                    || bad "interp: the frame multiplier follows the source rate" "$MUL_BAD"
+
+  # Motion after the first 400 frames must still count. The old default measured only the
+  # opening, so a clip that is static early and pans later was recommended minterpolate -
+  # exactly the footage this tool exists to catch.
+  LATE="$W/ilate.mp4"
+  ffmpeg -hide_banner -loglevel error -y \
+    -f lavfi -i "color=c=gray:s=160x120:r=15:d=30" \
+    -f lavfi -i "testsrc2=s=320x240:r=15:d=8" \
+    -filter_complex "[0:v]trim=end_frame=420,setpts=PTS-STARTPTS[a];\
+[1:v]trim=end_frame=60,setpts=PTS-STARTPTS,crop=160:120:min(iw-160\,n*16):40[b];[a][b]concat=n=2:v=1[v]" \
+    -map "[v]" -frames:v 480 -c:v libx264 -crf 18 -pix_fmt yuv420p "$LATE"
+  LATE_ALL="$(python "$G_RIFE" recommend "$LATE" 2>/dev/null)"
+  LATE_400="$(python - "$REPO" "$LATE" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1] + "/pipeline")
+import rife
+m = rife.block_motion(sys.argv[2], sample=400)
+print("rife" if m > rife.MOTION_THRESHOLD else "minterpolate")
+PY
+)"
+  if [ "$LATE_ALL" = "rife" ] && [ "$LATE_400" = "minterpolate" ]; then
+    ok "interp: a pan after frame 400 still selects rife (opening-only said $LATE_400)"
+  else
+    bad "interp: a pan after frame 400 still selects rife" \
+        "whole clip said '${LATE_ALL:-<none>}', first 400 said '${LATE_400:-<none>}'"
+  fi
+
+  # A partial setup must not pass. interpolate() does `from train_log.RIFE_HDv3 import
+  # Model`, so weights alone are not enough: the old check looked only for flownet.pkl and
+  # let a half-installed model through to fail with ModuleNotFoundError from inside the
+  # import — the exact failure this guard exists to pre-empt.
+  rm -f "$FAKE/Practical-RIFE/train_log/RIFE_HDv3.py"
+  AV3="$(RIFE_HOME="$FAKE" python -c "
+import os, sys
+sys.path.insert(0, '$REPO/pipeline')
+import rife
+print('yes' if rife.available() else 'no')")"
+  assert_eq "interp: weights without the model code count as unavailable" "no" "$AV3"
+  : > "$FAKE/Practical-RIFE/train_log/RIFE_HDv3.py"
 
   # --explain must actually explain. finish.sh reads the recommendation from line 1 and the
   # measurement from line 2 of ONE call; if the second line goes missing the log silently
@@ -731,17 +783,38 @@ print('yes' if rife.available() else 'no')")"
   # immediately preceding it, which runs INTERP=minterpolate explicitly and therefore
   # never went near the fallback: auto was not exercised, and neither was its warning.
   # RIFE_HOME points somewhere empty, so `available()` is false and the branch is forced.
+  # The fallback only exists on the rife branch, so the fixture has to actually recommend
+  # rife and the assertion has to say so. Matching any "auto -> " line accepted a run that
+  # chose minterpolate and never entered the fallback at all — and the previous fixture sat
+  # at 3.80% against a 3.0% threshold, close enough to drift across it silently.
   clean_iout
+  PANSRC="$W/ipan.mp4"
+  mk_vfr_source "$PANSRC" 40 5 8
+  PANRAW="$W/ipanraw.mp4"
+  # A hard horizontal pan: unambiguously above the threshold, not marginally so.
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=s=320x240:r=15:d=6" \
+    -frames:v "$(frame_count "$PANSRC")" \
+    -vf "crop=160:120:min(iw-160\,n*14):40,scale=64:36" \
+    -c:v libx264 -crf 18 -pix_fmt yuv420p "$PANRAW"
+  PANREC="$(python "$REPO/pipeline/rife.py" recommend "$PANRAW" --explain 2>/dev/null)"
+  case "$(printf '%s\n' "$PANREC" | sed -n 1p)" in
+    rife) ok "interp: the fallback fixture does recommend rife ($(printf '%s\n' "$PANREC" | sed -n 2p))" ;;
+    *) bad "interp: the fallback fixture does recommend rife" \
+           "fixture recommends '$(printf '%s\n' "$PANREC" | sed -n 1p)' — it cannot exercise the fallback" ;;
+  esac
+
   out="$(env INTERP=auto RIFE_HOME="$W/no_rife_here" bash "$REPO/pipeline/finish.sh" \
-    "$RAW" I "$SRC" "$IOUT" 2>&1)"
+    "$PANRAW" I "$PANSRC" "$IOUT" 2>&1)"
   if [ ! -f "$IOUT/I_lumafix_K5.mp4" ]; then
     bad "interp: auto falls back to minterpolate when RIFE is absent" \
         "no deliverable: $(printf '%s' "$out" | tail -1)"
   else
     case "$out" in
-      *"auto -> "*) ok "interp: auto falls back to minterpolate when RIFE is absent" ;;
+      *"auto -> rife"*"not set up"*) ok "interp: auto falls back to minterpolate when RIFE is absent" ;;
+      *"auto -> rife"*) bad "interp: auto falls back to minterpolate when RIFE is absent" \
+             "chose rife but printed no fallback warning" ;;
       *) bad "interp: auto falls back to minterpolate when RIFE is absent" \
-             "auto path never ran: $(printf '%s' "$out" | grep -i interp | head -1)" ;;
+             "never reached the rife branch: $(printf '%s' "$out" | grep -- '-> ' | head -1)" ;;
     esac
   fi
 fi

@@ -237,8 +237,13 @@ import sys; sys.path.insert(0,'$HERE'); import rife; sys.exit(0 if rife.availabl
   # rather than the plain one here.
   [ -x "$RIFE_PY" ] || { echo "!! $RIFE_PY is not executable. RIFE needs its own venv;" >&2
                          echo "   see the setup notes in pipeline/rife.py." >&2; exit 1; }
+  # Derived, not hardcoded. `4` assumed a 15fps source; timing.base_rate supports others,
+  # and on a 30fps source 30x4 is 120fps, after which trimming to EXPECT60 frames keeps
+  # only the first half of the clip while every frame-count check still passes.
+  RIFE_MULTI=$(python "$HERE/rife.py" multiplier "$BASE_FPS")
+  echo "    rife x$RIFE_MULTI from ${BASE_FPS}fps"
   "$RIFE_PY" "$HERE/rife.py" interpolate \
-    "$OUT_DIR/${TAG}_lumafix_14fps.mp4" "$W/i60_raw.mp4" 4 1.0
+    "$OUT_DIR/${TAG}_lumafix_14fps.mp4" "$W/i60_raw.mp4" "$RIFE_MULTI" 1.0
   # RIFE emits (n-1)*4+1: there is nothing past the last source frame to interpolate
   # into. Same tail as minterpolate, so the same fix - clone, then trim to the count the
   # SOURCE timestamps imply rather than to whatever the render happened to produce.

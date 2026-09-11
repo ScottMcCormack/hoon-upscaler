@@ -28,6 +28,7 @@ one without listing it here fails the suite.
 - [Interpolation and stall handling — five things ruled out, 2026-09-03](#interpolation-and-stall-handling--five-things-ruled-out-2026-09-03)
 - [minterpolate cannot interpolate a fast pan, 2026-09-06](#minterpolate-cannot-interpolate-a-fast-pan-2026-09-06)
 - [The interpolator threshold was measured in the wrong units, 2026-09-08](#the-interpolator-threshold-was-measured-in-the-wrong-units-2026-09-08)
+- [The interpolator's blind spots were all in what it did not look at, 2026-09-11](#the-interpolators-blind-spots-were-all-in-what-it-did-not-look-at-2026-09-11)
 
 **Grading**
 
@@ -1045,3 +1046,42 @@ and 4x must pick the same interpolator, and reverting to pixels fails it.
 The general point is one this project keeps meeting from new angles. **A measurement needs
 its units and its baseline recorded, or it is an anecdote.** "39px" is not a fact about a
 clip; it is a fact about a clip at a resolution, and the resolution was the part left out.
+
+## The interpolator's blind spots were all in what it did not look at, 2026-09-11
+
+A third review round on the RIFE branch. Five findings, and four of them share a shape:
+something was checked over a subset, and the subset was not stated.
+
+**Motion was measured over the first 400 frames only** - 27% of the N90 clip. A clip that
+is static early and pans later could not influence its own recommendation, which is exactly
+the footage the tool exists to catch. Measuring everything costs 1.1s against 0.5s on 1480
+frames, and the answer moved (1.86% -> 1.94%), so even the calibration clip was not
+represented by its opening. A fixture that pans only after frame 400 now pins it: the whole
+clip says rife, the first 400 frames say minterpolate.
+
+**`available()` checked the weights but not the model code.** `interpolate()` does
+`from train_log.RIFE_HDv3 import Model`; the guard looked only for `flownet.pkl`. A
+half-installed model passed the friendly check and failed with `ModuleNotFoundError` from
+inside the import - the failure the guard exists to pre-empt. Worth recording that this was
+found one round *after* the same function was changed for a different reason: fixing
+`exists()` to `os.access(X_OK)` did not prompt asking whether it was checking the right
+files.
+
+**The frame multiplier was hardcoded to 4**, correct only for a 15fps source. At 30fps that
+is 120fps, and trimming to the expected 60fps frame count then keeps the first half of the
+clip - with every frame-count guard still passing, because the count is right. It is now
+derived from `BASE_FPS`, and lives in `rife.py` rather than inline in the shell so it can be
+tested without a GPU.
+
+**A test that could stop testing without failing.** The fallback case asserted any
+`auto -> ` line, and its fixture measured 3.80% against a 3.0% threshold. It did enter the
+fallback - but a 27% margin is close enough to drift across silently, after which the test
+would pass while exercising nothing. The fixture is now an unambiguous pan (66.35%) and the
+assertion requires both `auto -> rife` and the warning.
+
+The fifth: the setup notes cloned mutable HEAD and asked for "a model's" files, while the
+findings name **v4.25** and the code calls `RIFE_HDv3`'s signature. Now pinned and named.
+
+**Three of my own fixes in this round initially survived a mutation sweep**, including two
+that the review had explicitly asked to be covered by tests. Writing the fix and reading the
+request is not the same as doing what it asked.

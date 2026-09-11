@@ -889,6 +889,47 @@ PY
              "never reached the rife branch: $(printf '%s' "$out" | grep -- '-> ' | head -1)" ;;
     esac
   fi
+
+  # An unmeasurable render during auto-select must not abort finish.sh. This is the
+  # defect a bare `RECO="$(rife.py recommend ...)"` produced under set -e: motion
+  # measurement failing killed the pipeline AFTER luma-fix, cadence-restore and grading
+  # had already run, instead of falling back to minterpolate. Verified by forcing
+  # `recommend` to fail in a patched COPY of the pipeline directory (rife.py's own guards
+  # already refuse a too-short render cleanly, so triggering the failure through a real
+  # clip would test THOSE guards, not this one) and running the real finish.sh against it
+  # end to end.
+  # Mirrors <repo>/pipeline/, not a flat copy: finish.sh derives REPO from its own
+  # location as "$HERE/.." and then imports timing.py as "$REPO/pipeline/timing" - a flat
+  # copy breaks that assumption and fails before ever reaching the code under test here.
+  PIPECOPY="$W/pipecopy"; rm -rf "$PIPECOPY"; mkdir -p "$PIPECOPY/pipeline"
+  cp "$REPO/pipeline/finish.sh" "$REPO/pipeline/luma_stabilise.py" \
+     "$REPO/pipeline/timing.py" "$REPO/pipeline/grade.py" "$REPO/pipeline/rife.py" \
+     "$REPO/pipeline/selective_interp.py" "$PIPECOPY/pipeline/"
+  python - "$PIPECOPY/pipeline/rife.py" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+old = '    elif cmd == "recommend":\n        m = block_motion(sys.argv[2])'
+new = '    elif cmd == "recommend":\n        sys.exit(1)  # TEST INJECTION: force auto-select to see a failure\n        m = block_motion(sys.argv[2])'
+assert s.count(old) == 1, f"anchor matched {s.count(old)} times"
+open(p, "w").write(s.replace(old, new))
+PY
+  FSRC="$W/ifail_src.mp4"; FRAW="$W/ifail_raw.mp4"; FOUT="$W/ifail_out"
+  mk_vfr_source "$FSRC" 20 5 8
+  mk_upscaled "$FRAW" "$(frame_count "$FSRC")"
+  rm -rf "$FOUT"; mkdir -p "$FOUT"
+  FOUT_LOG="$(bash "$PIPECOPY/pipeline/finish.sh" "$FRAW" IFAIL "$FSRC" "$FOUT" 2>&1)"; FRC=$?
+  if [ "$FRC" -ne 0 ] || [ ! -f "$FOUT/IFAIL_lumafix_K5.mp4" ]; then
+    bad "interp: an unmeasurable render during auto-select falls back, not aborts" \
+        "exit $FRC: $(printf '%s' "$FOUT_LOG" | tail -2 | head -1)"
+  else
+    case "$FOUT_LOG" in
+      *"could not measure motion"*"Falling back to minterpolate"*)
+        ok "interp: an unmeasurable render during auto-select falls back, not aborts" ;;
+      *) bad "interp: an unmeasurable render during auto-select falls back, not aborts" \
+             "deliverable produced but no fallback message: $(printf '%s' "$FOUT_LOG" | tail -1)" ;;
+    esac
+  fi
 fi
 
 # ---------------------------------------------------------------------------

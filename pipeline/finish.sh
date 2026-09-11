@@ -204,28 +204,43 @@ echo "    target $EXPECT60 frames (video spans ${SRC_SPAN}s)"
 INTERP="${INTERP:-auto}"
 case "$INTERP" in
   auto|minterpolate|rife) ;;
-  *) echo "!! unknown INTERP '$INTERP' - expected auto, minterpolate or rife"; exit 1 ;;
+  *) echo "!! unknown INTERP '$INTERP' - expected auto, minterpolate or rife" >&2; exit 1 ;;
 esac
+# The invocation is shared; the exit-code capture at each call site cannot be, and
+# trying to make it a shared out-parameter was itself a bug once already: `X="$(rife_try
+# ...)"` runs rife_try in a SUBSHELL (every command substitution does), so an
+# out-parameter it sets is invisible to the caller once that subshell exits. The
+# function's own EXIT STATUS - which mirrors python's, since that is its last command -
+# survives the subshell boundary the normal way, via $? read immediately after the
+# assignment. What every call site still needs is `&& OK=0 || OK=$?`, not a bare
+# assignment: a bare one is how "RIFE cannot run here" turned into "finish.sh aborted
+# after luma-fix, cadence-restore and grading had already run" rather than falling back to
+# minterpolate, and that happened TWICE on this branch - once when RECO was first added
+# unguarded, and again when an unrelated edit reintroduced the same bare form afterward.
+rife_try() { python "$HERE/rife.py" "$@" 2>&1; }
+
 if [ "$INTERP" = "auto" ]; then
   # One call, not two. block_motion scans the whole clip through OpenCV by default (see
   # pipeline/rife.py), and asking separately for the recommendation and the number
   # measured the same clip twice for no reason.
-  RECO="$(python "$HERE/rife.py" recommend "$OUT_DIR/${TAG}_lumafix_14fps.mp4" --explain)"
-  INTERP="$(printf '%s\n' "$RECO" | sed -n 1p)"
-  echo "    auto -> $INTERP  ($(printf '%s\n' "$RECO" | sed -n 2p))"
-  if [ "$INTERP" = "rife" ]; then
-    # Probed once and remembered. Each probe spawns the venv interpreter and cold-imports
-    # torch plus the model, so asking twice on the normal auto path paid that startup
-    # cost twice for an answer that cannot change in between.
-    # `&& ... || ...`, not a bare assignment. Under `set -e` a command substitution that
-    # exits nonzero kills the script, so probing an UNAVAILABLE RIFE aborted finish.sh at
-    # the exact moment the fallback existed to rescue it. Third time this trap has been
-    # written in this repo; CLAUDE.md records the other two.
-    RIFE_WHY="$(python "$HERE/rife.py" why 2>&1)" && RIFE_OK=0 || RIFE_OK=$?
-    if [ "$RIFE_OK" -ne 0 ]; then
-      echo "    !! this footage wants RIFE but it cannot run here: $RIFE_WHY"
-      echo "       Falling back to minterpolate; expect warping through the fast passages."
-      INTERP=minterpolate
+  RECO="$(rife_try recommend "$OUT_DIR/${TAG}_lumafix_14fps.mp4" --explain)" && RECO_RC=0 || RECO_RC=$?
+  if [ "$RECO_RC" -ne 0 ]; then
+    echo "    !! could not measure motion to auto-select an interpolator: $RECO"
+    echo "       Falling back to minterpolate."
+    INTERP=minterpolate
+  else
+    INTERP="$(printf '%s\n' "$RECO" | sed -n 1p)"
+    echo "    auto -> $INTERP  ($(printf '%s\n' "$RECO" | sed -n 2p))"
+    if [ "$INTERP" = "rife" ]; then
+      # Probed once and remembered. Each probe spawns the venv interpreter and cold-imports
+      # torch plus the model, so asking twice on the normal auto path paid that startup
+      # cost twice for an answer that cannot change in between.
+      RIFE_WHY="$(rife_try why)" && RIFE_OK=0 || RIFE_OK=$?
+      if [ "$RIFE_OK" -ne 0 ]; then
+        echo "    !! this footage wants RIFE but it cannot run here: $RIFE_WHY"
+        echo "       Falling back to minterpolate; expect warping through the fast passages."
+        INTERP=minterpolate
+      fi
     fi
   fi
 fi
@@ -237,7 +252,7 @@ if [ "$INTERP" = "rife" ]; then
   # caller explicitly asked not to have.
   # Reuse the auto path's answer when it already probed; otherwise ask now.
   if [ -z "${RIFE_OK:-}" ]; then
-    RIFE_WHY="$(python "$HERE/rife.py" why 2>&1)" && RIFE_OK=0 || RIFE_OK=$?
+    RIFE_WHY="$(rife_try why)" && RIFE_OK=0 || RIFE_OK=$?
   fi
   if [ "$RIFE_OK" -ne 0 ]; then
     echo "!! INTERP=rife but RIFE cannot run here: $RIFE_WHY" >&2

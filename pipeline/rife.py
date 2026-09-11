@@ -425,7 +425,7 @@ def main():
     if cmd == "measure":
         m = block_motion(sys.argv[2])
         rec = recommendation(m)
-        print(f"block motion p95: {100*m:.2f}% of width  "
+        print(f"block motion (windowed max): {100*m:.2f}% of width  "
               f"threshold {100*MOTION_THRESHOLD:.1f}%  -> {rec}")
     elif cmd == "recommend":
         m = block_motion(sys.argv[2])
@@ -436,7 +436,7 @@ def main():
         # saving larger than when this was written against a 400-frame cap. Same shape as
         # grade.py --both.
         if len(sys.argv) > 3 and sys.argv[3] == "--explain":
-            print(f"block motion p95: {100*m:.2f}% of width, "
+            print(f"block motion (windowed max): {100*m:.2f}% of width, "
                   f"threshold {100*MOTION_THRESHOLD:.1f}%")
     elif cmd == "why":
         why = unavailable_reason()

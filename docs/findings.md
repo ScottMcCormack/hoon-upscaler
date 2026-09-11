@@ -35,6 +35,7 @@ one without listing it here fails the suite.
 - [p95 over a whole clip discards its top 5% by definition, 2026-09-11](#p95-over-a-whole-clip-discards-its-top-5-by-definition-2026-09-11)
 - [An independent high-effort review found ten more, all in code no round had touched, 2026-09-11](#an-independent-high-effort-review-found-ten-more-all-in-code-no-round-had-touched-2026-09-11)
 - [CI failed twice on a test that passed locally both times, 2026-09-11](#ci-failed-twice-on-a-test-that-passed-locally-both-times-2026-09-11)
+- [`git checkout` on a file with real uncommitted work silently discarded it, 2026-09-11](#git-checkout-on-a-file-with-real-uncommitted-work-silently-discarded-it-2026-09-11)
 
 **Grading**
 
@@ -1363,3 +1364,38 @@ applied to a threshold-adjacent test until this:** a test asserting which side o
 threshold a continuous measurement lands on needs margin proportional to the measurement's
 own noise floor, not just enough margin to pass once, in one place, on one machine. CI
 finding this is exactly what CI is for.
+
+## `git checkout` on a file with real uncommitted work silently discarded it, 2026-09-11
+
+The RECO guard, the shared `rife_try()` helper, and the stderr redirect on unknown
+`INTERP` were all fixed once already, reported as done, and then quietly reverted before
+they were ever committed - by me, running `git checkout -q pipeline/finish.sh` to restore
+the file after a manual mutation test, not realising the file still held real, uncommitted
+fixes at that moment. `git checkout` restores from the last commit, not from "a moment
+ago" - it does not know or care that a mutation test was the only thing that should have
+been undone.
+
+The next Copilot review round found both losses independently, as if they were new: the
+unguarded `RECO=` assignment (identical to a defect already fixed and written up two
+commits earlier) and the missing `>&2` (same). Re-fixed, and this time verified by copying
+the file to a scratch path before mutating it, never touching git state for a throwaway
+test.
+
+**The regression test for the RECO guard could not be built the way earlier guard tests in
+this suite are: by handing `rife.py` a file it cannot measure.** `block_motion` already
+refuses a too-short render cleanly (its own guard, tested elsewhere), and the pipeline's
+own stages fail loudly on a genuinely pathological source before ever reaching
+auto-select. Testing "does finish.sh survive `recommend` failing" therefore needed
+`recommend` to fail on a valid render, which nothing in this codebase does. The test
+copies `pipeline/` to a scratch directory, patches that copy's `rife.py` to force
+`recommend` to fail, and runs the real `finish.sh` against a real, valid clip end to end -
+mutation-verified against the exact defect that motivated it: reverting the guard fails
+this test and none of the others.
+
+**A second, smaller mistake surfaced building that test.** The first attempt copied the
+pipeline files flat into the scratch directory. `finish.sh` derives its own `REPO` as
+`"$HERE/.."` and then imports `timing.py` from `"$REPO/pipeline"` - a flat copy breaks
+that assumption and the test failed before ever reaching the code under test, with an
+unrelated `ModuleNotFoundError`. Mirroring the real `pipeline/` subdirectory fixed it.
+Diagnosed by running the exact scenario by hand outside the suite rather than guessing
+from the truncated failure message the harness prints.

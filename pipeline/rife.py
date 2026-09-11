@@ -12,15 +12,18 @@ That was never sized against footage that pans. Measured per-frame block motion:
 Measured on the sources themselves, and as a fraction because the pixel figure depends on
 what resolution you measure at - see MOTION_THRESHOLD.
 
-On the 1080p deliverable that is ~130px — well outside the 32px window the estimator can
-look in — so it returns a wrong vector and the compensation warps the picture along it.
-The result reads as the frame flowing rather than moving.
+The mechanism is occlusion, not the search window. At this speed roughly 8.4% of the frame
+width is newly revealed each frame, and that content has no correspondence in the previous
+frame to warp from - so block compensation stretches neighbours into it, and the result
+reads as the frame flowing rather than moving. RIFE synthesises those regions instead of
+warping into them.
 
-Raising `search_param` does not fix it. At 250 the measurement says ZERO frames are beyond
-range and it is still glassy, which rules the search range out as the mechanism. What
-remains is inherent to block compensation on a fast pan: up to 8.4% of the frame width is
-newly revealed each frame and has no correspondence to warp from, so blocks get stretched
-into it. RIFE synthesises those regions instead of warping into them.
+The search window is the hypothesis this replaced, and it was tested and ruled out: at
+`search_param` 250 the measurement says ZERO frames are beyond range and the output is
+still glassy. Block motion above the 32px default is therefore a good *predictor* of the
+failure - the two travel together, since both follow from fast panning - but it is not the
+cause, which is why raising the range does not help. The threshold below selects on it as
+a proxy, deliberately.
 
 WHAT IT CANNOT FIX
 
@@ -48,16 +51,17 @@ Point RIFE_HOME elsewhere if you put it somewhere else.
 
   rife.py measure <video>                         report motion and the recommendation
   rife.py recommend <video> [--explain]           the recommendation, optionally with why
-  rife.py multiplier <base_fps>                   frames per source frame to reach 60fps
   rife.py why                                     whether RIFE can run here, and if not why
-  rife.py interpolate <in> <out> [multi] [scale]  interpolate
+  rife.py interpolate <in> <out> [target_fps] [scale]   interpolate to a target rate
 """
 import os
 import subprocess
 import sys
 
-# Above this p95 block motion, minterpolate's default 32px search is too small and its
-# output warps.
+# Above this p95 block motion, minterpolate's output warps. Block motion is a PROXY here,
+# not the cause - see the module docstring: the mechanism is occlusion on a fast pan, and
+# fast panning is what makes block motion large. Selecting on the symptom is deliberate;
+# the cause has no cheap direct measurement.
 #
 # Expressed as a FRACTION OF FRAME WIDTH, not in pixels. Block motion scales with
 # resolution, so an absolute threshold means different things on different renders:
@@ -148,27 +152,25 @@ def block_motion(path, sample=None):
     return float(np.percentile(vals, 95)) / width
 
 
-def multiplier(base_fps, target=60.0):
-    """How many RIFE frames per source frame, to reach at least `target` fps.
+def output_schedule(n_src, src_fps, target_fps=60.0):
+    """The (source_index, fraction) pairs to synthesise, one per output frame.
 
-    Lives here rather than inline in finish.sh so it can be tested without a GPU. The
-    value used to be hardcoded to 4, which is right only for a 15fps source: at 30fps that
-    produces 120fps, and trimming to the expected 60fps frame count then keeps the first
-    half of the clip while every frame-count check still passes.
+    Pure and separable from the model on purpose. RIFE's output on synthetic test footage
+    is not a reliable way to measure cadence - a textureless bar gives it nothing to
+    estimate flow from - so what gets asserted is the schedule, which is the part this
+    code decides. Even spacing here is what "no judder" means before the model is
+    involved at all.
     """
-    import math
-    n, _, d = str(base_fps).partition("/")
-    try:
-        fps = float(n) / float(d or 1)
-    except ValueError:
-        raise SystemExit(f"!! cannot read a frame rate from {base_fps!r}")
-    if fps <= 0:
-        raise SystemExit(f"!! frame rate must be positive, got {base_fps!r}")
-    # 1 is legitimate at or above the target: interpolate()'s inner loop is
-    # `for k in range(1, multi)`, so multi=1 emits the source frames and nothing else.
-    # Forcing 2 there bought a 120fps model pass whose every other frame is then dropped
-    # by the fps filter - the most expensive way to change nothing.
-    return max(1, math.ceil(target / fps))
+    if n_src < 1 or src_fps <= 0 or target_fps <= 0:
+        raise SystemExit(f"!! cannot schedule {n_src} frames at {src_fps}->{target_fps}fps")
+    span = (n_src - 1) / src_fps
+    n_out = int(round(span * target_fps)) + 1
+    out = []
+    for j in range(n_out):
+        pos = j * src_fps / target_fps
+        i = min(int(pos + 1e-9), n_src - 1)
+        out.append((i, pos - i))
+    return out
 
 
 def unavailable_reason():
@@ -215,7 +217,7 @@ def available():
     return unavailable_reason() is None
 
 
-def interpolate(src, dst, multi=4, scale=1.0):
+def interpolate(src, dst, target_fps=60.0, scale=1.0):
     import numpy as np
     import torch
 
@@ -232,8 +234,16 @@ def interpolate(src, dst, multi=4, scale=1.0):
     w, h, fps, n = probe(src)
     ph = ((h - 1) // tmp + 1) * tmp
     pw = ((w - 1) // tmp + 1) * tmp
-    print(f"    {w}x{h} @ {fps:g}fps, {n} frames -> {fps*multi:g}fps, "
-          f"{(n-1)*multi+1} frames (pad {pw}x{ph}, scale {scale})")
+    # Output times, not a whole-number multiple of the input. RIFE takes an arbitrary
+    # timestep, so the frames can be synthesised AT the 60Hz instants rather than at
+    # source-multiples that are then resampled to 60. Resampling was the defect: a 24fps
+    # source x3 is 72fps, and `fps=60` on that advances motion in a mix of 1/72 and 2/72
+    # steps, repeating some frames outright - measured 0/1/2-frame steps over one second.
+    # Uniform container timestamps hid it; the motion itself juddered.
+    sched = output_schedule(n, fps, target_fps)
+    n_out = len(sched)
+    print(f"    {w}x{h} @ {fps:g}fps, {n} frames -> {target_fps:g}fps, "
+          f"{n_out} frames (pad {pw}x{ph}, scale {scale})")
 
     torch.set_grad_enabled(False)
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -247,7 +257,7 @@ def interpolate(src, dst, multi=4, scale=1.0):
     rd = subprocess.Popen(["ffmpeg", "-v", "error", "-i", src, "-f", "rawvideo",
                            "-pix_fmt", "rgb24", "-"], stdout=subprocess.PIPE)
     wr = subprocess.Popen(["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt",
-                           "rgb24", "-s", f"{w}x{h}", "-r", f"{fps*multi:g}", "-i", "-",
+                           "rgb24", "-s", f"{w}x{h}", "-r", f"{target_fps:g}", "-i", "-",
                            "-c:v", "libx264", "-preset", "fast", "-crf", "12", "-pix_fmt",
                            "yuv420p", dst], stdin=subprocess.PIPE)
     fsz = w * h * 3
@@ -280,19 +290,38 @@ def interpolate(src, dst, multi=4, scale=1.0):
     if prev is None:
         raise SystemExit("!! no frames decoded")
     t_prev = to_t(prev)
-    emit(t_prev)
-    done = 1
-    while True:
-        cur = read()
-        if cur is None:
-            break
-        t_cur = to_t(cur)
-        for k in range(1, multi):
-            emit(model.inference(t_prev, t_cur, k / multi, scale))
-        emit(t_cur)
-        t_prev, done = t_cur, done + 1
-        if done % 100 == 0:
-            print(f"    {done}/{n}", flush=True)
+
+    # Walk the OUTPUT clock. For each 60Hz instant, find the source interval containing it
+    # and ask the model for exactly that fraction. Source frames are reused as-is only
+    # when an instant lands on one (fraction 0), which is what keeps 15fps->60fps
+    # identical to the old multiple-of-4 behaviour.
+    # t_prev is source frame `i`; t_cur is the lookahead for frame `i+1`, or None when it
+    # has not been read yet. Advancing consumes the lookahead - an earlier version read a
+    # frame into t_cur without counting it, so every later advance skipped one and the
+    # output tracked the source at roughly double speed.
+    i, t_cur = 0, None
+
+    def ensure_cur():
+        nonlocal t_cur
+        if t_cur is None:
+            nxt = read()
+            t_cur = None if nxt is None else to_t(nxt)
+        return t_cur
+
+    for j, (want, frac) in enumerate(sched):
+        while i < want:
+            if ensure_cur() is None:
+                break
+            t_prev, t_cur, i = t_cur, None, i + 1
+        if frac <= 1e-9:
+            emit(t_prev)
+        elif ensure_cur() is None:
+            emit(t_prev)                      # past the last source frame; hold it
+        else:
+            emit(model.inference(t_prev, t_cur, frac, scale))
+        if (j + 1) % 200 == 0:
+            print(f"    {j+1}/{n_out}", flush=True)
+
 
     wr.stdin.close()
     rd.stdout.close()
@@ -308,10 +337,9 @@ def interpolate(src, dst, multi=4, scale=1.0):
                          f"no encoder, no space, or an unwritable path")
 
     got = probe(dst)[3]
-    want = (n - 1) * multi + 1
     # A truncated interpolation still plays; only the frame count gives it away.
-    if got != want:
-        raise SystemExit(f"!! wrote {got} frames, expected {want}")
+    if got != n_out:
+        raise SystemExit(f"!! wrote {got} frames, expected {n_out}")
     print(f"    {got} frames")
 
 
@@ -341,13 +369,11 @@ def main():
         why = unavailable_reason()
         print(why or "available")
         sys.exit(0 if why is None else 1)
-    elif cmd == "multiplier":
-        print(multiplier(sys.argv[2]))
     elif cmd == "interpolate":
         if len(sys.argv) < 4:
-            raise SystemExit("usage: rife.py interpolate <in> <out> [multi] [scale]")
+            raise SystemExit("usage: rife.py interpolate <in> <out> [target_fps] [scale]")
         interpolate(sys.argv[2], sys.argv[3],
-                    int(sys.argv[4]) if len(sys.argv) > 4 else 4,
+                    float(sys.argv[4]) if len(sys.argv) > 4 else 60.0,
                     float(sys.argv[5]) if len(sys.argv) > 5 else 1.0)
     else:
         raise SystemExit(f"unknown command '{cmd}'")

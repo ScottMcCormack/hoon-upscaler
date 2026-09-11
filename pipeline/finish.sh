@@ -192,12 +192,12 @@ SRC_SPAN=$(cat "$W/span.txt")
 EXPECT60=$(python -c "print(round($SRC_SPAN * 60))")
 echo "    target $EXPECT60 frames (video spans ${SRC_SPAN}s)"
 
-# Which interpolator. minterpolate searches for motion within search_param pixels
-# (default 32) and warps the picture along whatever vector it finds; on footage that pans
-# faster than that window it finds the wrong one and the result flows rather than moves.
-# Raising the search range does not fix it - at 250, zero frames were beyond range and it
-# was still wrong - because the failure is block compensation stretching into newly
-# revealed areas, not the search. RIFE synthesises those instead.
+# Which interpolator. On a fast pan, roughly 8% of the frame width is newly revealed each
+# frame and has no correspondence in the previous one, so minterpolate's block compensation
+# stretches neighbours into it and the picture flows rather than moves. RIFE synthesises
+# those regions instead. The search window was the hypothesis this replaced and is ruled
+# out - at search 250, zero frames were beyond range and the output was still glassy - so
+# block motion is selected on as a PROXY for fast panning, not as the cause.
 #
 # auto measures and picks. minterpolate stays the default where it works, since RIFE needs
 # a CUDA torch and a model that this repo does not vendor.
@@ -250,22 +250,21 @@ if [ "$INTERP" = "rife" ]; then
   # rather than the plain one here.
   [ -x "$RIFE_PY" ] || { echo "!! $RIFE_PY is not executable. RIFE needs its own venv;" >&2
                          echo "   see the setup notes in pipeline/rife.py." >&2; exit 1; }
-  # Derived, not hardcoded. `4` assumed a 15fps source; timing.base_rate supports others,
-  # and on a 30fps source 30x4 is 120fps, after which trimming to EXPECT60 frames keeps
-  # only the first half of the clip while every frame-count check still passes.
-  RIFE_MULTI=$(python "$HERE/rife.py" multiplier "$BASE_FPS")
-  echo "    rife x$RIFE_MULTI from ${BASE_FPS}fps"
+  # Ask for 60fps directly rather than a whole-number multiple of the source. RIFE takes
+  # an arbitrary timestep, so it can synthesise AT the 60Hz instants; going via a multiple
+  # and resampling afterwards was what produced uneven motion - 24fps x3 is 72fps, and
+  # `fps=60` on that advances the picture in a mix of 1/72 and 2/72 steps, repeating some
+  # frames outright. The container timestamps looked uniform either way, which is why the
+  # frame-count and duration checks did not notice.
   "$RIFE_PY" "$HERE/rife.py" interpolate \
-    "$OUT_DIR/${TAG}_lumafix_14fps.mp4" "$W/i60_raw.mp4" "$RIFE_MULTI" 1.0
+    "$OUT_DIR/${TAG}_lumafix_14fps.mp4" "$W/i60_raw.mp4" 60 1.0
   # RIFE emits (n-1)*4+1: there is nothing past the last source frame to interpolate
   # into. Same tail as minterpolate, so the same fix - clone, then trim to the count the
   # SOURCE timestamps imply rather than to whatever the render happened to produce.
-  # fps=60 before the trim, not after. RIFE emits BASE_FPS*RIFE_MULTI, which is only
-  # exactly 60 when the multiplier divides in - 24fps x3 is 72fps, and trimming 72fps
-  # material to the 60fps frame count keeps 5/6 of the clip while the frame-count guard
-  # below still passes, because the COUNT is right and the DURATION is not. The
-  # minterpolate branch gets this free from `minterpolate=fps=60`; this branch has to say
-  # it. Harmless when the rate already is 60: the filter passes frames through.
+  # fps=60 is now a no-op - RIFE emits at exactly 60 - and is kept as a belt-and-braces
+  # assertion of the contract rather than as the fix it briefly was. If the interpolator
+  # ever returns to a non-60 rate, this keeps the DURATION right even though it cannot
+  # keep the cadence even; the schedule test is what protects the cadence.
   ffmpeg -y -v error -i "$W/i60_raw.mp4" \
     -vf "tpad=stop=8:stop_mode=clone,fps=60,trim=end_frame=$EXPECT60,setpts=PTS-STARTPTS" \
     -c:v libx264 -preset fast -crf 12 -an "$W/i60.mp4"

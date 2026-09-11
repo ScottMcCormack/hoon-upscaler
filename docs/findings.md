@@ -30,6 +30,7 @@ one without listing it here fails the suite.
 - [The interpolator threshold was measured in the wrong units, 2026-09-08](#the-interpolator-threshold-was-measured-in-the-wrong-units-2026-09-08)
 - [The interpolator's blind spots were all in what it did not look at, 2026-09-11](#the-interpolators-blind-spots-were-all-in-what-it-did-not-look-at-2026-09-11)
 - [Fixing the multiplier did not fix the rate, 2026-09-11](#fixing-the-multiplier-did-not-fix-the-rate-2026-09-11)
+- [Even timestamps are not even motion, 2026-09-11](#even-timestamps-are-not-even-motion-2026-09-11)
 
 **Grading**
 
@@ -1133,3 +1134,45 @@ And two stale claims written during the previous round: a comment describing a 4
 decode cap that had been removed in the same commit, and a findings line saying the model
 revision was "pinned" when the setup notes still carry a placeholder. Both were true when
 drafted and false by the time they were committed.
+
+## Even timestamps are not even motion, 2026-09-11
+
+The 60fps normalisation from the previous round fixed the duration and left the cadence
+broken, which the next review found.
+
+Interpolating to a whole-number multiple and resampling afterwards is not the same as
+interpolating to the target rate. A 24fps source at x3 is 72fps; `fps=60` on that keeps 60
+of every 72 frames, and measured over one second the source position advances in steps of:
+
+```
+step 0 frames:  4 times      <- a frame repeated outright
+step 1 frame : 34 times
+step 2 frames: 21 times
+```
+
+The container timestamps are perfectly uniform, the frame count is right, the duration is
+right - and the picture judders, because **motion advances unevenly while the clock does
+not**. Every check in place at the time was a check on the clock.
+
+RIFE takes an arbitrary timestep, so the fix is to synthesise AT the output instants rather
+than at source-multiples: walk the 60Hz clock, and for each instant ask the model for the
+exact fraction between the two source frames bracketing it. The multiplier concept
+disappears entirely, which is a simplification rather than a cost - one fewer number to
+derive, and no resampling stage to get wrong.
+
+**What is asserted, and why it is not the rendered frames.** Two fixtures were built and
+both were useless: a flat-luma ramp has no motion for the model to estimate, and a
+textureless moving bar gives it nothing to track, so the model's output on either says more
+about RIFE on synthetic input than about cadence. What this repository actually decides is
+the *schedule*, so `output_schedule()` is pure and separable and the test asserts that its
+steps are evenly spaced at 15, 24, 25, 30, 14.75 and 60fps. Reverting to multiples-then-
+resample fails it.
+
+**A rationale that argued against itself.** The module docstring, `finish.sh`, `CLAUDE.md`
+and the test header all said minterpolate fails because motion exceeds its 32px search
+window - and then, immediately below, that raising the window to 250 left zero frames
+beyond range and the output still glassy. Both statements were true and the first is not
+the cause. The cause is occlusion: ~8% of the frame width is newly revealed each frame with
+nothing to warp from. Block motion remains the selection criterion because it is a good
+*proxy* - both follow from fast panning - and that is now what the text says. The review
+named four locations; there were six.

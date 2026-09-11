@@ -625,8 +625,9 @@ PY
 fi
 
 # ---------------------------------------------------------------------------
-# Interpolator selection. minterpolate's 32px motion search is too small for footage
-# that pans; the choice between it and RIFE is made from a measurement. Only the
+# Interpolator selection. On a fast pan, minterpolate stretches blocks into newly revealed
+# content that has no correspondence to warp from; the 32px search window is a ruled-out
+# hypothesis rather than the cause, and block motion is selected on as a proxy. the choice between it and RIFE is made from a measurement. Only the
 # selection and the guards are tested - running RIFE needs a CUDA torch and model
 # weights that this repo does not vendor, so the model itself is out of scope here.
 # ---------------------------------------------------------------------------
@@ -713,42 +714,37 @@ import rife
 print('yes' if rife.available() else 'no')")"
   assert_eq "interp: an executable venv python counts as available" "yes" "$AV2"
 
-  # The RIFE multiplier must come from the source rate. Hardcoded 4 is right only at
-  # 15fps; at 30fps it produces 120fps and the later trim to the expected 60fps frame
-  # count keeps the first HALF of the clip, with every frame-count check still passing.
-  MUL_BAD=""
-  # 60/1 -> 1: interpolate()'s loop is range(1, multi), so multi=1 emits the source frames
-  # and nothing else. Forcing 2 there bought a 120fps model pass whose every other frame
-  # the fps filter then drops.
-  for case in 15/1:4 30/1:2 24/1:3 59/4:5 60/1:1 120/1:1; do
-    rate="${case%%:*}"; want="${case##*:}"
-    got="$(python "$G_RIFE" multiplier "$rate" 2>/dev/null)"
-    [ "$got" = "$want" ] || MUL_BAD="$MUL_BAD ${rate}->${got:-<none>}(want $want)"
-  done
-  [ -z "$MUL_BAD" ] && ok "interp: the frame multiplier follows the source rate" \
-                    || bad "interp: the frame multiplier follows the source rate" "$MUL_BAD"
-
-  # The multiplier only guarantees AT LEAST 60fps. 24fps x3 is 72fps, and trimming 72fps
-  # material to the 60fps frame count keeps 5/6 of the clip while a frame-count check still
-  # passes — the count is right and the duration is not. This exercises the postprocess
-  # filter chain on a non-60 rate without needing CUDA or a model.
-  RAWRATE="$W/i72.mp4"
-  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=s=64x36:r=72:d=5" \
-    -frames:v 360 -c:v libx264 -crf 20 -pix_fmt yuv420p "$RAWRATE"
-  E60=300     # a 5s span at 60fps
-  ffmpeg -hide_banner -loglevel error -y -i "$RAWRATE" \
-    -vf "tpad=stop=8:stop_mode=clone,fps=60,trim=end_frame=$E60,setpts=PTS-STARTPTS" \
-    -c:v libx264 -preset fast -crf 18 -an "$W/i72_out.mp4"
-  OUTN="$(frame_count "$W/i72_out.mp4")"
-  OUTD="$(duration_of "$W/i72_out.mp4")"
-  OUTR="$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0 "$W/i72_out.mp4" | tr -d ',')"
-  SPAN_OK="$(python -c "print('yes' if abs($OUTD - 5.0) < 0.05 else 'no')")"
-  if [ "$OUTN" = "$E60" ] && [ "$OUTR" = "60/1" ] && [ "$SPAN_OK" = "yes" ]; then
-    ok "interp: a 72fps stream is normalised to 60fps over the full span ($OUTN frames, ${OUTD}s)"
-  else
-    bad "interp: a 72fps stream is normalised to 60fps over the full span" \
-        "$OUTN frames at $OUTR covering ${OUTD}s, wanted $E60 at 60/1 covering 5.0s"
-  fi
+  # The output clock must be evenly spaced at every source rate. This is the property
+  # "no judder" actually means, and it is asserted on the SCHEDULE rather than on rendered
+  # frames: RIFE's output on synthetic footage is not a reliable cadence measurement,
+  # because a textureless test pattern gives it nothing to estimate flow from. The
+  # schedule is the part this repository decides.
+  #
+  # The defect it replaces: interpolating to a whole-number multiple and resampling to 60
+  # afterwards. 24fps x3 is 72fps, and `fps=60` on that advanced the picture in a mix of
+  # 1/72 and 2/72 steps and repeated some frames outright — measured 0/1/2-frame steps
+  # across one second — while frame count, rate and duration all looked correct.
+  SCHED="$(python - "$REPO" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1] + "/pipeline")
+import rife
+bad = []
+for src, tgt in ((15, 60), (24, 60), (25, 60), (30, 60), (14.75, 60), (60, 60)):
+    sched = rife.output_schedule(48, src, tgt)
+    pos = [i + f for i, f in sched]
+    steps = [b - a for a, b in zip(pos, pos[1:])]
+    if not steps:
+        bad.append(f"{src}->{tgt}: no steps"); continue
+    ideal = src / tgt
+    worst = max(abs(s - ideal) for s in steps)
+    if worst > 1e-9:
+        bad.append(f"{src}->{tgt}: step deviates by {worst:.3e} (ideal {ideal:.4f})")
+    if any(i > 47 or i < 0 for i, _ in sched):
+        bad.append(f"{src}->{tgt}: source index out of range")
+print("ok" if not bad else "bad: " + "; ".join(bad[:3]))
+PY
+)"
+  assert_eq "interp: the 60fps output clock is evenly spaced at every source rate" "ok" "$SCHED"
 
   # Motion after the first 400 frames must still count. The old default measured only the
   # opening, so a clip that is static early and pans later was recommended minterpolate -

@@ -46,6 +46,7 @@ one without listing it here fails the suite.
 - [My own audio fix cost the pipeline a redundant remux, and could delete a finished render, 2026-09-12](#my-own-audio-fix-cost-the-pipeline-a-redundant-remux-and-could-delete-a-finished-render-2026-09-12)
 - [The stride grid's blind spot was never only at the tail, 2026-09-12](#the-stride-grids-blind-spot-was-never-only-at-the-tail-2026-09-12)
 - [A flag fixed to one argv position broke the shorter form its own usage line advertised, 2026-09-12](#a-flag-fixed-to-one-argv-position-broke-the-shorter-form-its-own-usage-line-advertised-2026-09-12)
+- [nan and inf pass "<= 0", and a three-file guard only ever had two files tested, 2026-09-12](#nan-and-inf-pass-0-and-a-three-file-guard-only-ever-had-two-files-tested-2026-09-12)
 
 **Grading**
 
@@ -1835,3 +1836,30 @@ source path fails with `probe()`'s own message regardless of whether torch is in
 confirmed by simulating a missing `torch` locally (a fake `__import__` that raises
 `ModuleNotFoundError` for it) and checking `interpolate()` still fails cleanly on a
 nonexistent source rather than surfacing the import error.
+
+## nan and inf pass "<= 0", and a three-file guard only ever had two files tested, 2026-09-12
+
+**Malformed numeric CLI arguments escaped as raw tracebacks in two different ways, both
+reproduced before fixing.** `interpolate in out ""` failed inside `float()` with a bare
+`ValueError` - this documented CLI otherwise validates every mistake before doing work, so
+a caller sees a stack trace instead of the same clean message every other guard here gets.
+Separately, `nan` and `inf` both parse as valid floats, so they reached
+`output_schedule()`'s own guard - which checked `target_fps <= 0`, and neither `nan <= 0`
+nor `inf <= 0` is true, so both slipped through to crash further in: `math.ceil(nan)` raises
+`ValueError`, `math.ceil(inf)` raises `OverflowError`, neither the `SystemExit` this
+pipeline's guards are tested against. Fixed with two independent, narrow changes: a
+`parse_cli_float()` helper turning `float()`'s own exception into a usage error at the CLI
+layer, and an explicit `math.isfinite()` check added to `output_schedule()`'s existing
+guard, since `<= 0` alone was never sufficient to exclude non-finite values. `scale` did
+not need the same isfinite fix - `pad_to()`'s tuple-membership check (`scale not in
+(0.25, 0.5, 1.0, 2.0, 4.0)`) already rejects `nan` cleanly on its own, since `nan` is never
+equal to anything, itself included - checked directly rather than assumed before deciding
+it needed no separate fix. Mutation-tested: reverting either change independently fails
+exactly the tests built for it.
+
+**The three-file model-completeness guard had only ever been tested by removing two of the
+three files.** Existing tests covered a missing `IFNet_HDv3.py` and a missing
+`RIFE_HDv3.py` (the model CODE), but never a missing `flownet.pkl` (the weights
+themselves) - dropping it from the checked tuple in production would have left the whole
+suite green. Added the symmetric case. Mutation-tested: removing `flownet.pkl` from the
+guard's own tuple fails exactly this new test.

@@ -270,7 +270,12 @@ def output_schedule(n_src, src_fps, target_fps=60.0):
     code decides. Even spacing here is what "no judder" means before the model is
     involved at all.
     """
-    if n_src < 1 or src_fps <= 0 or target_fps <= 0:
+    # isfinite() first: nan and inf both fail "<= 0" (neither is true), so a target_fps
+    # of nan or inf used to slip past this guard entirely and crash uncleanly further
+    # down instead - math.ceil(nan) raises ValueError, math.ceil(inf) raises
+    # OverflowError, neither the SystemExit every other malformed input here gets.
+    if (n_src < 1 or not math.isfinite(src_fps) or src_fps <= 0
+            or not math.isfinite(target_fps) or target_fps <= 0):
         raise SystemExit(f"!! cannot schedule {n_src} frames at {src_fps}->{target_fps}fps")
     # Downsampling (target < source) is refused, not attempted. A lower target means the
     # schedule does not need every source frame - `want` can skip some entirely - and the
@@ -588,6 +593,22 @@ def recommendation(m):
     return "rife" if m > MOTION_THRESHOLD else "minterpolate"
 
 
+def parse_cli_float(s, name):
+    """A CLI numeric argument, as a clean usage error rather than a raw traceback.
+
+    `float("")` and `float("abc")` both raise ValueError with no context a caller sees as
+    theirs to fix - this pipeline's other guards are all tested against a SystemExit
+    instead. Does not reject non-finite values itself: target_fps is checked by
+    output_schedule() (which needs to, since nan and inf both pass a plain "<= 0" test),
+    and scale is already checked by pad_to()'s tuple membership test (nan is never equal
+    to anything, including itself, so it fails that test cleanly on its own).
+    """
+    try:
+        return float(s)
+    except ValueError:
+        raise SystemExit(f"!! {name} must be a number, got {s!r}")
+
+
 def main():
     # `why` is the one command that takes no argument, so the arity check cannot be a
     # single threshold — it printed the whole docstring instead of answering.
@@ -648,8 +669,8 @@ def main():
         if len(rest) > 2:
             raise SystemExit(f"!! unexpected extra argument(s) to 'interpolate': {rest[2:]}")
         interpolate(sys.argv[2], sys.argv[3],
-                    float(rest[0]) if len(rest) > 0 else 60.0,
-                    float(rest[1]) if len(rest) > 1 else 1.0,
+                    parse_cli_float(rest[0], "target_fps") if len(rest) > 0 else 60.0,
+                    parse_cli_float(rest[1], "scale") if len(rest) > 1 else 1.0,
                     with_audio=with_audio)
     else:
         raise SystemExit(f"unknown command '{cmd}'")

@@ -711,6 +711,28 @@ print('yes' if rife.available() else 'no')"
       python "$R" interpolate nonexistent_src.mp4 nonexistent_dst.mp4 $form
   done
 
+  # A malformed target_fps/scale must be a clean usage error, not float()'s own raw
+  # ValueError traceback - this documented CLI otherwise validates every mistake before
+  # doing work. No real input file needed: parsing happens before interpolate() is
+  # even called.
+  assert_stderr_matches "interp: an unparseable target_fps is refused, not a raw traceback" \
+    "target_fps must be a number, got ''" \
+    python "$R" interpolate nonexistent_src.mp4 nonexistent_dst.mp4 ""
+  assert_stderr_matches "interp: an unparseable scale is refused, not a raw traceback" \
+    "scale must be a number, got 'abc'" \
+    python "$R" interpolate nonexistent_src.mp4 nonexistent_dst.mp4 60 abc
+  # nan and inf both PARSE as floats - the guard that matters is output_schedule()'s own,
+  # which needs a real, valid source so it actually gets reached. Both used to fail
+  # uncleanly further in: math.ceil(nan) raises ValueError, math.ceil(inf) raises
+  # OverflowError, and "nan/inf both fail a plain <= 0 test" is exactly why the earlier
+  # guard let them through in the first place - reproduced directly before fixing.
+  assert_stderr_matches "interp: a non-finite target_fps (nan) is refused" \
+    "cannot schedule" \
+    python "$R" interpolate "$W/static.mp4" "$W/nan_out.mp4" nan
+  assert_stderr_matches "interp: a non-finite target_fps (inf) is refused" \
+    "cannot schedule" \
+    python "$R" interpolate "$W/static.mp4" "$W/inf_out.mp4" inf
+
   # An unknown INTERP must not fall through to a default the caller did not ask for.
   SRC="$W/isrc.mp4"; RAW="$W/iraw.mp4"; IOUT="$W/iout"; mkdir -p "$IOUT"
   mk_vfr_source "$SRC" 40 5 8
@@ -1071,6 +1093,15 @@ else:
   AV3="$(rife_available "$FAKE")"
   assert_eq "interp: weights without the model code count as unavailable" "no" "$AV3"
   : > "$FAKE/Practical-RIFE/train_log/RIFE_HDv3.py"
+
+  # The required-file check covers three files; the two tests above only ever removed
+  # the model CODE, never the weights themselves. Symmetric case: model code present,
+  # flownet.pkl missing - without this, dropping it from the checked tuple in production
+  # would leave the suite green.
+  rm -f "$FAKE/Practical-RIFE/train_log/flownet.pkl"
+  AV8="$(rife_available "$FAKE")"
+  assert_eq "interp: model code without the weights counts as unavailable" "no" "$AV8"
+  : > "$FAKE/Practical-RIFE/train_log/flownet.pkl"
 
   # Files present is not the same as importable. A venv without torch — or with one built
   # for a different CUDA line — passes every file check and then fails deep inside the

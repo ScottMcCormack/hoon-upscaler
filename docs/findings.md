@@ -66,6 +66,7 @@ one without listing it here fails the suite.
 - [Record the parameters or the render is uninterpretable](#record-the-parameters-or-the-render-is-uninterpretable)
 - [Durable output and A40 availability are currently mutually exclusive](#durable-output-and-a40-availability-are-currently-mutually-exclusive)
 - [A pod is not necessarily yours alone](#a-pod-is-not-necessarily-yours-alone)
+- [The launcher, executed for the first time 2026-09-07](#the-launcher-executed-for-the-first-time-2026-09-07)
 
 **What review keeps finding**
 
@@ -81,6 +82,7 @@ one without listing it here fails the suite.
 - [Reviewing my own work found what the reviewers had already fixed, 2026-09-08](#reviewing-my-own-work-found-what-the-reviewers-had-already-fixed-2026-09-08)
 - [The empty-argument guard reached two of three positionals, 2026-09-12](#the-empty-argument-guard-reached-two-of-three-positionals-2026-09-12)
 - [A third recurrence retired the hardcoded line number instead of re-verifying it again, 2026-09-12](#a-third-recurrence-retired-the-hardcoded-line-number-instead-of-re-verifying-it-again-2026-09-12)
+- [Six more findings, and the suite that would have caught them, 2026-09-12](#six-more-findings-and-the-suite-that-would-have-caught-them-2026-09-12)
 
 ## Pre-filters — roughly twenty variants, all unnecessary in the end
 

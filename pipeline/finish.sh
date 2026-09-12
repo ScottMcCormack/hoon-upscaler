@@ -362,9 +362,19 @@ ffmpeg -y -v error -i "$W/sel.mkv" -i "$SRC_ORIG" -map 0:v:0 -map 1:a:0? \
 # grading) sitting next to a STALE K5 from a previous run of the same TAG: three files
 # present, none missing, and no error visible in OUT_DIR itself - a mismatched deliverable
 # set that looked exactly like a complete one. Staging all three in the work directory
-# until this point and moving them in one place removes the window where that could
-# happen; a failure anywhere above this line now leaves OUT_DIR exactly as it was before
-# this run started; either every deliverable it publishes is from this run, or none are.
+# until this point closes THAT window: any command above this line failing - which is what
+# actually happened, and what the test below reproduces - now leaves OUT_DIR exactly as it
+# was before this run started.
+#
+# These three `mv`s are still three separate rename() calls, not one transaction - an
+# abrupt kill between them (not a command failing, but the process itself dying: SIGKILL,
+# power loss, the OOM killer CLAUDE.md's hardware notes already warn this box is prone to)
+# could still interleave old and new. Closing that too needs indirection this flat,
+# stable `$OUT_DIR/${TAG}_suffix.mp4` layout does not have: a per-TAG directory swapped by
+# a single rename, or a symlink pointer - a real design change to what every test, doc and
+# manual run of this pipeline reads as the deliverable path, to close a window now measured
+# in the time three rename() syscalls take rather than the minutes-long one this fix
+# actually closes. Not attempted here for that reason; noted rather than left implicit.
 mv "$W/graded.mp4"          "$OUT_DIR/${TAG}_lumafix_14fps.mp4"
 mv "$W/ungraded.mp4"        "$OUT_DIR/${TAG}_lumafix_14fps_ungraded.mp4"
 mv "$W/K5.mp4"              "$OUT_DIR/${TAG}_lumafix_K5.mp4"

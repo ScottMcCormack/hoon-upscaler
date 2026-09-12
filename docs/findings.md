@@ -1971,12 +1971,27 @@ that used to read the published copy (`recommend`, both interpolation branches,
 `selective_interp.py`) now reads the staged one instead; the 60fps deliverable is written
 to `$W/K5.mp4` rather than directly into `OUT_DIR`. All three `mv`s into `OUT_DIR` happen
 together, in one place, immediately before the `rm -rf "$W"` cleanup that already ran at
-the end - after every stage has succeeded. A failure anywhere above that point now leaves
-`OUT_DIR` exactly as it was before the run started; there is no longer a window in which
-only some of a run's deliverables have been published. This mirrors the ordering rule
-already applied at the top of this same script (`INTERP`/RIFE-availability validated
-before any expensive stage runs, not after) - here applied to the *publish* side of the
-same script rather than the *validate* side.
+the end - after every stage has succeeded. A failure anywhere above that point - any
+command exiting nonzero, which is what actually happened and what the new test
+reproduces - now leaves `OUT_DIR` exactly as it was before the run started. This mirrors
+the ordering rule already applied at the top of this same script (`INTERP`/RIFE-
+availability validated before any expensive stage runs, not after) - here applied to the
+*publish* side of the same script rather than the *validate* side.
+
+**This closes the window a failing command leaves open, not every window.** A follow-up
+review round correctly pointed out that the three `mv`s are still three separate
+`rename()` calls, not one transaction - an abrupt kill between them (not a command
+failing, but the process itself dying: `SIGKILL`, power loss, the OOM killer this
+project's own hardware notes already document as a real risk on this machine) could still
+interleave old and new deliverables. True all-or-none across three differently-named
+files needs indirection this pipeline's flat, stable `$OUT_DIR/${TAG}_suffix.mp4` layout
+does not have - a per-TAG directory swapped by a single rename, or a symlink pointer -
+which would change the deliverable path every test, doc, and manual run of this pipeline
+depends on, to close a window now measured in the time three `rename()` syscalls take
+rather than the minutes-long one this fix actually closes (the whole of stages `[4/5]` and
+`[5/5]`, previously). Not attempted, for that reason - the earlier wording in this entry
+and the code comment above the `mv`s both overstated the guarantee as covering an abrupt
+kill too; both have been corrected to say only what was actually fixed and tested.
 
 Mutation-tested: reverting the staging (republishing the 14fps pair immediately after
 grading, writing K5 straight to `OUT_DIR`, and dropping the tail publish-together block)

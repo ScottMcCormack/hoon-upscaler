@@ -58,6 +58,13 @@ Point RIFE_HOME elsewhere if you put it somewhere else.
   rife.py recommend <video> [--explain]           the recommendation, optionally with why
   rife.py why                                     whether RIFE can run here, and if not why
   rife.py interpolate <in> <out> [target_fps] [scale]   interpolate to a target rate
+                                                         <in> MUST be constant frame rate -
+                                                         output_schedule() assumes uniform
+                                                         spacing from probe()'s nominal fps
+                                                         alone. finish.sh already restores
+                                                         cadence to CFR before this runs; a
+                                                         direct caller with genuinely VFR
+                                                         input will get flattened timing.
 """
 import math
 import os
@@ -236,15 +243,22 @@ def output_schedule(n_src, src_fps, target_fps=60.0):
     """
     if n_src < 1 or src_fps <= 0 or target_fps <= 0:
         raise SystemExit(f"!! cannot schedule {n_src} frames at {src_fps}->{target_fps}fps")
-    span = (n_src - 1) / src_fps
-    # Ceiling, not round(): round() can land BELOW the true final source instant, and then
-    # the schedule never reaches it. output_schedule(46, 24, 60) rounds 112.5 down to 112
-    # (round-half-to-even), giving a last position of 44.8 against a true endpoint of 45 -
-    # frame 45 is only ever seen as 80% of a blend, never on its own, and finish.sh's tpad
-    # then pads the deliverable's tail by cloning that blend instead of the real last frame.
-    # A small tolerance keeps the exact-multiple cases (15/25/30/60fps sources at 48 frames,
-    # all already covered) from gaining a spurious extra frame to floating-point noise.
-    n_out = int(math.ceil(span * target_fps - 1e-9)) + 1
+    # The full playback duration, not the position of the last frame's START. n_src frames
+    # at src_fps each occupy 1/src_fps seconds, so the clip runs n_src/src_fps seconds in
+    # total - (n_src-1)/src_fps stops one frame-duration short of that, at the moment the
+    # last frame BEGINS rather than the moment it ENDS. finish.sh's own tpad/trim step masks
+    # the shortfall for the one caller that has it (it pads to a duration computed
+    # independently, from the real source's timestamps), but the standalone, documented
+    # `rife.py interpolate <in> <out>` CLI has no such step: reproduced directly, one real
+    # second of 15fps source (15 frames) used to emit 57 output frames at 60fps (0.95s),
+    # not the 60 (1.0s) a caller publishing that file straight would expect - 50ms short,
+    # audible as a slightly clipped ending on every direct (non-finish.sh) use.
+    span = n_src / src_fps
+    # Ceiling, not round(): round() can land BELOW the target instead of at or past it -
+    # this was true of the old (n_src-1)-based span too (see the regression test below for
+    # a concrete case), and a small tolerance keeps an exact multiple from gaining a
+    # spurious extra frame to floating-point noise.
+    n_out = int(math.ceil(span * target_fps - 1e-9))
     out = []
     for j in range(n_out):
         pos = j * src_fps / target_fps
@@ -483,6 +497,12 @@ def main():
         print(f"block motion (windowed max): {100*m:.2f}% of width  "
               f"threshold {100*MOTION_THRESHOLD:.1f}%  -> {rec}")
     elif cmd == "recommend":
+        # Checked before block_motion() runs, not after: a bad option is a usage error,
+        # not something that should have to wait behind a full clip scan (or fail with a
+        # confusing unrelated message, if the video path was ALSO bad - "could not measure
+        # motion" for what was actually a mistyped flag) to be reported.
+        if len(sys.argv) > 3 and sys.argv[3] != "--explain":
+            raise SystemExit(f"!! unknown option '{sys.argv[3]}', expected --explain")
         m = block_motion(sys.argv[2])
         rec = recommendation(m)
         print(rec)
@@ -491,8 +511,6 @@ def main():
         # saving larger than when this was written against a 400-frame cap. Same shape as
         # grade.py --both.
         if len(sys.argv) > 3:
-            if sys.argv[3] != "--explain":
-                raise SystemExit(f"!! unknown option '{sys.argv[3]}', expected --explain")
             print(f"block motion (windowed max): {100*m:.2f}% of width, "
                   f"threshold {100*MOTION_THRESHOLD:.1f}%")
     elif cmd == "why":

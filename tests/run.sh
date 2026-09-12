@@ -675,6 +675,13 @@ print('yes' if rife.available() else 'no')"
   assert_stderr_matches "interp: a mistyped --explain is refused, not silently ignored" \
     "unknown option '--explan'" \
     python "$R" recommend "$W/static.mp4" --explan
+  # The option check must run BEFORE block_motion() scans the clip, not after - otherwise
+  # an unreadable video path reports "could not measure motion" for what is actually a
+  # mistyped flag, and a readable one prints a partial recommendation before refusing.
+  # A nonexistent path makes this the only possible error if the option is checked first.
+  assert_stderr_matches "interp: a mistyped --explain is refused before the clip is scanned" \
+    "unknown option '--explan'" \
+    python "$R" recommend "$W/does_not_exist.mp4" --explan
   assert_stderr_matches "interp: an extra argument to 'why' is refused" \
     "unexpected extra argument" \
     python "$R" why extra_garbage
@@ -787,11 +794,18 @@ print('yes' if rife.available() else 'no')"
   # 1/72 and 2/72 steps and repeated some frames outright — measured 0/1/2-frame steps
   # across one second — while frame count, rate and duration all looked correct.
   # 48 frames divides evenly against every rate below; 46 does not, and that is the point
-  # of including it - round()-based rounding can land BELOW the true final source instant
-  # for a non-aligned count, so a suite that only ever tries 48 never exercises the case
-  # where the schedule falls short. Reproduced: output_schedule(46, 24, 60) used to stop at
-  # position 44.8, not 45 - the true last frame was only ever an 80% blend, never reached
-  # on its own, and finish.sh's tail-pad then cloned that blend instead of the real frame.
+  # of including it - round()-based rounding can land BELOW the true target for a
+  # non-aligned count, so a suite that only ever tries 48 never exercises the case where
+  # the schedule falls short.
+  #
+  # The target itself is the clip's FULL playback duration (n_src/src_fps seconds), not
+  # the position of the last frame's START ((n_src-1)/src_fps) - n_src frames each occupy
+  # 1/src_fps seconds, so stopping at the last frame's start is one frame-duration short of
+  # the clip actually ending. Reproduced: 15 frames of real 15fps source (1.0s) used to
+  # schedule only 57 output frames at 60fps (0.95s), not 60 - a real 50ms short for the
+  # documented standalone `interpolate` CLI, which has no padding step of its own;
+  # finish.sh's tpad/trim masks it for the one caller that has one, by padding to a
+  # duration computed independently from the real source's timestamps.
   SCHED="$(python - "$REPO" <<'PY'
 import sys
 sys.path.insert(0, sys.argv[1] + "/pipeline")
@@ -810,12 +824,14 @@ for n_src in (46, 48):
             bad.append(f"{n_src}@{src}->{tgt}: step deviates by {worst:.3e} (ideal {ideal:.4f})")
         if any(i > n_src - 1 or i < 0 for i, _ in sched):
             bad.append(f"{n_src}@{src}->{tgt}: source index out of range")
-        if pos[-1] < n_src - 1 - 1e-6:
-            bad.append(f"{n_src}@{src}->{tgt}: schedule stops at {pos[-1]:.4f}, short of the last frame {n_src-1}")
+        covered = len(sched) / tgt
+        true_duration = n_src / src
+        if covered < true_duration - 1e-6:
+            bad.append(f"{n_src}@{src}->{tgt}: schedule covers {covered:.4f}s, short of the true {true_duration:.4f}s")
 print("ok" if not bad else "bad: " + "; ".join(bad[:3]))
 PY
 )"
-  assert_eq "interp: the 60fps output clock is evenly spaced and reaches the last frame at every source rate" "ok" "$SCHED"
+  assert_eq "interp: the 60fps output clock is evenly spaced and covers the clip's full duration at every source rate" "ok" "$SCHED"
 
   # Motion after the first 400 frames must still count. The old default measured only the
   # opening, so a clip that is static early and pans later was recommended minterpolate -
@@ -1046,8 +1062,8 @@ print(rife.RIFE_HOME)")"
 import sys
 p = sys.argv[1]
 s = open(p).read()
-old = '    elif cmd == "recommend":\n        m = block_motion(sys.argv[2])'
-new = '    elif cmd == "recommend":\n        sys.exit(1)  # TEST INJECTION: force auto-select to see a failure\n        m = block_motion(sys.argv[2])'
+old = '    elif cmd == "recommend":\n'
+new = '    elif cmd == "recommend":\n        sys.exit(1)  # TEST INJECTION: force auto-select to see a failure\n'
 assert s.count(old) == 1, f"anchor matched {s.count(old)} times"
 open(p, "w").write(s.replace(old, new))
 PY

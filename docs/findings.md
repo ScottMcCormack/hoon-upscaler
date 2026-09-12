@@ -39,6 +39,7 @@ one without listing it here fails the suite.
 - [A second review round found six more, mostly the source-vs-render mixup repeating, 2026-09-11](#a-second-review-round-found-six-more-mostly-the-source-vs-render-mixup-repeating-2026-09-11)
 - [The atomicity fix itself broke the RIFE path, and "lossless" wasn't, 2026-09-12](#the-atomicity-fix-itself-broke-the-rife-path-and-lossless-wasnt-2026-09-12)
 - [round() can stop the output schedule short of the last frame, 2026-09-12](#round-can-stop-the-output-schedule-short-of-the-last-frame-2026-09-12)
+- [The schedule's own target was one frame-duration short of the clip's real length, 2026-09-12](#the-schedules-own-target-was-one-frame-duration-short-of-the-clips-real-length-2026-09-12)
 
 **Grading**
 
@@ -1525,12 +1526,14 @@ source instant rather than at or past it.** `output_schedule(46, 24, 60)` comput
 whose last position is 44.8 against a true endpoint of 45. The clip's actual last frame is
 then never scheduled on its own, only ever as 80% of a blend with the second-to-last one;
 `finish.sh`'s tail-pad clones that blended frame to reach the target duration instead of the
-real final frame. Reproduced directly before fixing, and worth noting the existing schedule
-test never had a chance to catch it: it always used 48 source frames, which happens to
-divide evenly (or overshoot) against every rate the suite tries - **including 14.75fps at
-48 frames, which was ALSO already short (46.9542 against a true 47) before this fix, just
-never checked for.** A test that only ever tries one frame count cannot see a defect that
-depends on the count not dividing evenly.
+real final frame. Reproduced directly before fixing, and worth being precise about why the
+existing schedule test never caught it: it asserted even STEP SIZE only, never that the
+schedule actually REACHES the last frame - a schedule can be perfectly evenly spaced and
+still stop short. That gap was real regardless of which frame count the test happened to
+use. It was not, however, purely theoretical: the same test's existing 48-frame fixture
+was **already** short at 14.75fps (46.9542 against a true 47) before this fix, on the exact
+input the suite was already running - just never checked for, because nothing asserted the
+endpoint.
 
 **Fixed with a ceiling, not a bigger round.** `int(math.ceil(span * target_fps - 1e-9)) + 1`
 reaches or passes the true endpoint in every case checked (46 and 48 source frames, at
@@ -1541,6 +1544,11 @@ and asserts the schedule's last position actually reaches `n_src - 1`, not only 
 steps are even. Mutation-tested: reverting to `round()` fails on exactly the cases
 identified above (46@24fps, 46@14.75fps, and the previously-unchecked 48@14.75fps) and
 passes the rest.
+
+**"Endpoint" here means the last frame's START position (`n_src - 1`), not the clip's
+full playback duration (`n_src` frames later) - the next entry below finds that this fix,
+correct as far as it goes, was still short of the latter by one whole frame-duration, and
+supersedes this one's target rather than contradicting it.**
 
 **The same review pointed out two real test-coverage gaps, both now closed.** The CUDA
 availability probe's two asserts (`torch.cuda.is_available()`, then an actual kernel
@@ -1556,3 +1564,51 @@ case `CLAUDE.md` records). Separately, the CLI arity test's own comment named `i
 as the case that used to reach the model on a stray extra argument, but no test exercised
 `interpolate` itself - added one; the arity guard runs before any model import, so it needs
 no real input file and stays CUDA-independent.
+
+## The schedule's own target was one frame-duration short of the clip's real length, 2026-09-12
+
+**The previous round's fix made `output_schedule` reach the last frame's START position;
+it never made it reach the clip's actual END.** `n_src` frames at `src_fps` each occupy
+`1/src_fps` seconds, so the clip's true playback duration is `n_src/src_fps` seconds - the
+position of the last frame's start, `(n_src-1)/src_fps`, is one whole frame-duration short
+of that. Scheduling only to the last frame's start therefore under-counts by design, not
+by a rounding accident this time. Reproduced directly: 15 real frames of 15fps source (one
+full second of footage) used to schedule only 57 output frames at 60fps - 0.95s, not the
+full 1.0s - a genuine, audible 50ms clipped off the end.
+
+**This does not break `finish.sh`, which has never relied on `output_schedule` reaching the
+full duration on its own.** Its `tpad=stop=8:stop_mode=clone,...,trim=end_frame=$EXPECT60`
+step pads to `EXPECT60`, computed independently from the real source's own timestamps
+(`timing.py`'s `span.txt`, which is `sum(durs) + term` - already the full-duration figure,
+not a last-frame-start one). Checked this directly rather than assuming it: `EXPECT60` and
+`output_schedule`'s new target now measure the *same* quantity from two different sources
+(a real-timestamp sum vs. a frame count and nominal rate), so they should already agree to
+within a frame or two - and the 8-frame `tpad` buffer covers exactly that residual, the same
+as it did before this fix, just with less of the buffer needed since RIFE's own genuine
+synthesis now covers more of the tail. The defect was real, but only for the documented,
+standalone `rife.py interpolate <in> <out>` CLI, which has no padding step of its own and
+simply publishes whatever `interpolate()` writes.
+
+**Fixed by redefining the schedule's own target to the clip's full duration** (`n_src /
+src_fps` seconds, not `(n_src - 1) / src_fps`), keeping the ceiling-based rounding from the
+previous round for the same reason it was added there. Verified against every previously
+tested combination (46 and 48 source frames, six rates) that the new target is met, not
+merely hoped for. The schedule test's endpoint assertion was rewritten to match: it now
+checks that `len(schedule) / target_fps` covers `n_src / src_fps`, not that the schedule's
+last position reaches `n_src - 1` - the old assertion is automatically satisfied by the new
+one, since covering the full duration implies covering the last frame's start, but not the
+reverse. Mutation-tested: reverting to the previous round's `(n_src - 1)`-based target fails
+this test and none of the others.
+
+**Declined: detecting and rejecting genuinely variable-rate input.** The review that found
+this also noted `output_schedule` assumes uniform frame spacing from `probe()`'s nominal
+frame rate alone, which would silently flatten real VFR input the way CLAUDE.md's timing
+rule warns against - but only for a hypothetical direct CLI caller. `finish.sh` never
+exposes this: it always feeds `interpolate()` the `_lumafix_14fps.mp4` render, which
+cadence-restore has already converted to genuine CFR (with stalls represented as held,
+repeated frames) before this code ever sees it. Building a VFR detector was not attempted:
+verifying one needs known-good VFR fixtures to calibrate a rejection tolerance against, and
+this repository has exactly one real VFR file with no independently-known-correct answer to
+check a detector against - a wrong tolerance risks the opposite failure, `finish.sh`'s own
+legitimate CFR intermediate being refused. Documented the constraint in `rife.py`'s own
+usage text instead of guessing at an unverifiable guard.

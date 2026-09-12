@@ -59,6 +59,7 @@ Point RIFE_HOME elsewhere if you put it somewhere else.
   rife.py why                                     whether RIFE can run here, and if not why
   rife.py interpolate <in> <out> [target_fps] [scale]   interpolate to a target rate
 """
+import math
 import os
 import subprocess
 import sys
@@ -236,7 +237,14 @@ def output_schedule(n_src, src_fps, target_fps=60.0):
     if n_src < 1 or src_fps <= 0 or target_fps <= 0:
         raise SystemExit(f"!! cannot schedule {n_src} frames at {src_fps}->{target_fps}fps")
     span = (n_src - 1) / src_fps
-    n_out = int(round(span * target_fps)) + 1
+    # Ceiling, not round(): round() can land BELOW the true final source instant, and then
+    # the schedule never reaches it. output_schedule(46, 24, 60) rounds 112.5 down to 112
+    # (round-half-to-even), giving a last position of 44.8 against a true endpoint of 45 -
+    # frame 45 is only ever seen as 80% of a blend, never on its own, and finish.sh's tpad
+    # then pads the deliverable's tail by cloning that blend instead of the real last frame.
+    # A small tolerance keeps the exact-multiple cases (15/25/30/60fps sources at 48 frames,
+    # all already covered) from gaining a spurious extra frame to floating-point noise.
+    n_out = int(math.ceil(span * target_fps - 1e-9)) + 1
     out = []
     for j in range(n_out):
         pos = j * src_fps / target_fps

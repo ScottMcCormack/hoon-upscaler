@@ -38,6 +38,7 @@ one without listing it here fails the suite.
 - [`git checkout` on a file with real uncommitted work silently discarded it, 2026-09-11](#git-checkout-on-a-file-with-real-uncommitted-work-silently-discarded-it-2026-09-11)
 - [A second review round found six more, mostly the source-vs-render mixup repeating, 2026-09-11](#a-second-review-round-found-six-more-mostly-the-source-vs-render-mixup-repeating-2026-09-11)
 - [The atomicity fix itself broke the RIFE path, and "lossless" wasn't, 2026-09-12](#the-atomicity-fix-itself-broke-the-rife-path-and-lossless-wasnt-2026-09-12)
+- [round() can stop the output schedule short of the last frame, 2026-09-12](#round-can-stop-the-output-schedule-short-of-the-last-frame-2026-09-12)
 
 **Grading**
 
@@ -1515,3 +1516,43 @@ appending that window's start whenever the grid doesn't already include it. Unli
 findings above, this one lives in `block_motion`, which the suite can and does exercise
 directly - mutation-tested the usual way: reverting the fix fails the new regression test
 and none of the others.
+
+## round() can stop the output schedule short of the last frame, 2026-09-12
+
+**`output_schedule`'s frame count used `round()`, which can land BELOW the true final
+source instant rather than at or past it.** `output_schedule(46, 24, 60)` computes
+`round(112.5)` - Python rounds half to even, so this is 112, not 113 - giving a schedule
+whose last position is 44.8 against a true endpoint of 45. The clip's actual last frame is
+then never scheduled on its own, only ever as 80% of a blend with the second-to-last one;
+`finish.sh`'s tail-pad clones that blended frame to reach the target duration instead of the
+real final frame. Reproduced directly before fixing, and worth noting the existing schedule
+test never had a chance to catch it: it always used 48 source frames, which happens to
+divide evenly (or overshoot) against every rate the suite tries - **including 14.75fps at
+48 frames, which was ALSO already short (46.9542 against a true 47) before this fix, just
+never checked for.** A test that only ever tries one frame count cannot see a defect that
+depends on the count not dividing evenly.
+
+**Fixed with a ceiling, not a bigger round.** `int(math.ceil(span * target_fps - 1e-9)) + 1`
+reaches or passes the true endpoint in every case checked (46 and 48 source frames, at
+15/24/25/30/14.75/60fps), and the small tolerance keeps the exact-multiple cases from
+gaining a spurious extra frame to floating-point noise - verified this holds for all of
+them, not assumed. The existing schedule test now checks 46 as well as 48 source frames,
+and asserts the schedule's last position actually reaches `n_src - 1`, not only that its
+steps are even. Mutation-tested: reverting to `round()` fails on exactly the cases
+identified above (46@24fps, 46@14.75fps, and the previously-unchecked 48@14.75fps) and
+passes the rest.
+
+**The same review pointed out two real test-coverage gaps, both now closed.** The CUDA
+availability probe's two asserts (`torch.cuda.is_available()`, then an actual kernel
+launch) were not pinned by anything in the suite - every existing fixture's fake
+`venv/bin/python` is a shell script that exits 0 or 1 unconditionally, ignoring whatever
+probe source it is handed, so deleting either assert would still leave every prior test
+green. Verified this directly: with both asserts stripped from the probe, the full suite
+still passed before adding coverage for them. Two new fixtures use a REAL python
+interpreter with a fake `torch` and `train_log.RIFE_HDv3` on `PYTHONPATH` so the probe's
+own source actually executes - one where `cuda.is_available()` returns `False`, one where
+it returns `True` but the kernel launch itself raises (the shape of the Blackwell-no-kernels
+case `CLAUDE.md` records). Separately, the CLI arity test's own comment named `interpolate`
+as the case that used to reach the model on a stray extra argument, but no test exercised
+`interpolate` itself - added one; the arity guard runs before any model import, so it needs
+no real input file and stays CUDA-independent.

@@ -681,6 +681,13 @@ print('yes' if rife.available() else 'no')"
   assert_stderr_matches "interp: an extra argument to 'measure' is refused" \
     "unexpected extra argument" \
     python "$R" measure "$W/static.mp4" extra_garbage
+  # The rationale above names 'interpolate' specifically - an extra argument there was
+  # the case that used to reach the (expensive) model instead of stopping at the arity
+  # check. The guard runs before any model import, so this needs no real input file to
+  # stay CUDA-independent: it never gets far enough to open one.
+  assert_stderr_matches "interp: an extra argument to 'interpolate' is refused" \
+    "unexpected extra argument" \
+    python "$R" interpolate nonexistent_src.mp4 nonexistent_dst.mp4 60 1.0 extra_garbage
 
   # An unknown INTERP must not fall through to a default the caller did not ask for.
   SRC="$W/isrc.mp4"; RAW="$W/iraw.mp4"; IOUT="$W/iout"; mkdir -p "$IOUT"
@@ -779,27 +786,36 @@ print('yes' if rife.available() else 'no')"
   # afterwards. 24fps x3 is 72fps, and `fps=60` on that advanced the picture in a mix of
   # 1/72 and 2/72 steps and repeated some frames outright — measured 0/1/2-frame steps
   # across one second — while frame count, rate and duration all looked correct.
+  # 48 frames divides evenly against every rate below; 46 does not, and that is the point
+  # of including it - round()-based rounding can land BELOW the true final source instant
+  # for a non-aligned count, so a suite that only ever tries 48 never exercises the case
+  # where the schedule falls short. Reproduced: output_schedule(46, 24, 60) used to stop at
+  # position 44.8, not 45 - the true last frame was only ever an 80% blend, never reached
+  # on its own, and finish.sh's tail-pad then cloned that blend instead of the real frame.
   SCHED="$(python - "$REPO" <<'PY'
 import sys
 sys.path.insert(0, sys.argv[1] + "/pipeline")
 import rife
 bad = []
-for src, tgt in ((15, 60), (24, 60), (25, 60), (30, 60), (14.75, 60), (60, 60)):
-    sched = rife.output_schedule(48, src, tgt)
-    pos = [i + f for i, f in sched]
-    steps = [b - a for a, b in zip(pos, pos[1:])]
-    if not steps:
-        bad.append(f"{src}->{tgt}: no steps"); continue
-    ideal = src / tgt
-    worst = max(abs(s - ideal) for s in steps)
-    if worst > 1e-9:
-        bad.append(f"{src}->{tgt}: step deviates by {worst:.3e} (ideal {ideal:.4f})")
-    if any(i > 47 or i < 0 for i, _ in sched):
-        bad.append(f"{src}->{tgt}: source index out of range")
+for n_src in (46, 48):
+    for src, tgt in ((15, 60), (24, 60), (25, 60), (30, 60), (14.75, 60), (60, 60)):
+        sched = rife.output_schedule(n_src, src, tgt)
+        pos = [i + f for i, f in sched]
+        steps = [b - a for a, b in zip(pos, pos[1:])]
+        if not steps:
+            bad.append(f"{n_src}@{src}->{tgt}: no steps"); continue
+        ideal = src / tgt
+        worst = max(abs(s - ideal) for s in steps)
+        if worst > 1e-9:
+            bad.append(f"{n_src}@{src}->{tgt}: step deviates by {worst:.3e} (ideal {ideal:.4f})")
+        if any(i > n_src - 1 or i < 0 for i, _ in sched):
+            bad.append(f"{n_src}@{src}->{tgt}: source index out of range")
+        if pos[-1] < n_src - 1 - 1e-6:
+            bad.append(f"{n_src}@{src}->{tgt}: schedule stops at {pos[-1]:.4f}, short of the last frame {n_src-1}")
 print("ok" if not bad else "bad: " + "; ".join(bad[:3]))
 PY
 )"
-  assert_eq "interp: the 60fps output clock is evenly spaced at every source rate" "ok" "$SCHED"
+  assert_eq "interp: the 60fps output clock is evenly spaced and reaches the last frame at every source rate" "ok" "$SCHED"
 
   # Motion after the first 400 frames must still count. The old default measured only the
   # opening, so a clip that is static early and pans later was recommended minterpolate -
@@ -889,6 +905,58 @@ PY
   done
   AV5="$(rife_available "$BROKEN")"
   assert_eq "interp: a venv that cannot import the model counts as unavailable" "no" "$AV5"
+
+  # The two asserts INSIDE the probe (torch.cuda.is_available(), then an actual kernel
+  # launch) were not pinned by anything above: every fixture's "venv/bin/python" is a
+  # shell script that exits 0 or 1 unconditionally, ignoring the probe source it is
+  # handed, so deleting either assert from unavailable_reason() would still leave every
+  # test above green. Both fixtures below use a REAL python interpreter with a fake
+  # `torch` and `train_log.RIFE_HDv3` on PYTHONPATH, so the probe's own source actually
+  # runs - one where cuda.is_available() is False, one where it is True but the kernel
+  # launch itself raises (the shape of the Blackwell-no-kernels case CLAUDE.md records).
+  mkfake_rife_probe() {  # mkfake_rife_probe <dir> <torch.py contents via stdin>
+    local dir="$1"
+    mkdir -p "$dir/venv/bin" "$dir/Practical-RIFE/train_log" "$dir/fakemods"
+    for fpart in flownet.pkl IFNet_HDv3.py; do
+      : > "$dir/Practical-RIFE/train_log/$fpart"
+    done
+    printf 'class Model:\n    pass\n' > "$dir/Practical-RIFE/train_log/RIFE_HDv3.py"
+    cat > "$dir/fakemods/torch.py"
+    printf '#!/bin/sh\nexec env PYTHONPATH="%s" python3 "$@"\n' "$dir/fakemods" \
+      > "$dir/venv/bin/python"
+    chmod +x "$dir/venv/bin/python"
+  }
+
+  NOCUDA="$W/nocuda_rife"
+  mkfake_rife_probe "$NOCUDA" <<'PY'
+class _Cuda:
+    @staticmethod
+    def is_available():
+        return False
+cuda = _Cuda()
+def ones(*a, **k):
+    raise AssertionError("should not be reached: is_available() already returned False")
+PY
+  AV6="$(rife_available "$NOCUDA")"
+  assert_eq "interp: a venv that imports fine but reports no CUDA device counts as unavailable" \
+    "no" "$AV6"
+
+  NOKERNEL="$W/nokernel_rife"
+  mkfake_rife_probe "$NOKERNEL" <<'PY'
+class _Cuda:
+    @staticmethod
+    def is_available():
+        return True
+cuda = _Cuda()
+class _NoKernelTensor:
+    def sum(self):
+        raise RuntimeError("no kernel image is available for execution on the device")
+def ones(*a, **k):
+    return _NoKernelTensor()
+PY
+  AV7="$(rife_available "$NOKERNEL")"
+  assert_eq "interp: a venv that reports CUDA but cannot launch a kernel counts as unavailable" \
+    "no" "$AV7"
 
   # RIFE_HOME="" must resolve the same way rife.py's own bash caller resolves it.
   # finish.sh reads it as `${RIFE_HOME:-default}`, which treats an explicitly empty value

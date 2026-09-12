@@ -842,6 +842,25 @@ PY
   SHORTPAN_REC="$(python "$REPO/pipeline/rife.py" recommend "$SHORTPAN" 2>/dev/null)"
   assert_eq "interp: a severe pan under 5% of the clip still selects rife" "rife" "$SHORTPAN_REC"
 
+  # A severe pan confined to the clip's closing ~1s must still select rife, even when it
+  # does not align with the stride grid. The grid's starts are 0, stride, 2*stride, ... and
+  # stop at the last multiple <= (len(arr) - win); when (len(arr) - win) is not itself a
+  # multiple of stride, the true final window is never tried on its own, only ever
+  # diluted alongside earlier, calmer frames inside the nearest window the grid does reach.
+  # 70 calm frames + a 15-frame pan (chosen so the gap is present, verified by direct
+  # computation rather than assumed) reproduced it: 4.70% with only the grid's windows
+  # (picks minterpolate) against 8.64% once the true final window is included (picks rife).
+  TAILPAN="$W/itailpan.mp4"
+  ffmpeg -hide_banner -loglevel error -y \
+    -f lavfi -i "color=c=gray:s=160x120:r=15:d=10" \
+    -f lavfi -i "testsrc2=s=320x240:r=15:d=2" \
+    -filter_complex "[0:v]trim=end_frame=70,setpts=PTS-STARTPTS[a];\
+[1:v]trim=end_frame=15,setpts=PTS-STARTPTS,crop=160:120:min(iw-160\,n*7):40[b];[a][b]concat=n=2:v=1[v]" \
+    -map "[v]" -frames:v 85 -c:v libx264 -crf 18 -pix_fmt yuv420p "$TAILPAN"
+  TAILPAN_REC="$(python "$REPO/pipeline/rife.py" recommend "$TAILPAN" 2>/dev/null)"
+  assert_eq "interp: a severe pan confined to the clip's closing second still selects rife" \
+    "rife" "$TAILPAN_REC"
+
   # A partial setup must not pass. interpolate() does `from train_log.RIFE_HDv3 import
   # Model`, so weights alone are not enough: the old check looked only for flownet.pkl and
   # let a half-installed model through to fail with ModuleNotFoundError from inside the

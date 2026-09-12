@@ -37,6 +37,7 @@ one without listing it here fails the suite.
 - [CI failed twice on a test that passed locally both times, 2026-09-11](#ci-failed-twice-on-a-test-that-passed-locally-both-times-2026-09-11)
 - [`git checkout` on a file with real uncommitted work silently discarded it, 2026-09-11](#git-checkout-on-a-file-with-real-uncommitted-work-silently-discarded-it-2026-09-11)
 - [A second review round found six more, mostly the source-vs-render mixup repeating, 2026-09-11](#a-second-review-round-found-six-more-mostly-the-source-vs-render-mixup-repeating-2026-09-11)
+- [The atomicity fix itself broke the RIFE path, and "lossless" wasn't, 2026-09-12](#the-atomicity-fix-itself-broke-the-rife-path-and-lossless-wasnt-2026-09-12)
 
 **Grading**
 
@@ -1474,3 +1475,43 @@ and only fail once `interpolate()` is already running. A real fix needs the actu
 `Model()`/`load_model()` call this environment cannot exercise (no GPU, no vendored
 weights - the same boundary the project has stated throughout for this file). Left as a
 named gap rather than guessed at.
+
+## The atomicity fix itself broke the RIFE path, and "lossless" wasn't, 2026-09-12
+
+**The previous round's own atomicity fix (`dst + ".partial"`) would have broken every real
+RIFE run.** Appending the marker after the extension turns `i60_raw.mp4` into
+`i60_raw.mp4.partial` - not a recognised container extension, and ffmpeg infers its output
+muxer from one when `-f` isn't given for the destination. Reproduced directly: `ffmpeg ...
+out.mp4.partial` refuses with "Unable to find a suitable output format" before writing a
+frame. The temp file was never wrong in principle - splitting the extension and inserting
+the marker before it (`i60_raw.partial.mp4`) keeps a real extension and was confirmed
+to encode correctly. A fix for one defect (a partial file at the published path) shipped a
+worse one (the RIFE path cannot run at all) in the same commit, caught by the next review
+round rather than by anything in this project's own process - there is no automated test
+over `interpolate()`'s internals for the reason repeated throughout this file, so this class
+of mistake is exactly what that gap allows through.
+
+**"Lossless (crf 0)" was lossless only relative to a pixel format that already discarded
+information.** `-c:v libx264 -crf 0 -pix_fmt yuv420p` makes the H.264 encode step
+mathematically lossless, but `yuv420p` subsamples chroma to a quarter of luma's spatial
+resolution before that encode ever sees the frame - a real, permanent loss the crf setting
+cannot see or undo. Measured directly rather than trusting the claim already in the code:
+round-tripped one frame through `libx264/yuv420p/crf0` (max channel difference from the RGB
+source: 37 of 255, mean 2.5) against `libx264rgb/crf0` fed the same `rgb24` the model
+already produces (max difference: 0, bit-exact). Switched to `libx264rgb`, which needed no
+other change - the pipe already carries `rgb24` frames, `yuv420p` was an unnecessary
+conversion on the way in as well as a lossy one.
+
+**A third finding in the same round - a stride-grid gap in the windowed-max statistic -
+was reproducible and fixed with a test.** `block_motion`'s window starts are
+`range(0, len(arr) - win + 1, stride)`; when `len(arr) - win` isn't itself a multiple of
+`stride`, the grid's last start falls short of it, and the true final window - covering the
+clip's last `win` samples - is never tried on its own. A severe pan confined to exactly that
+tail is only ever seen diluted alongside earlier, calmer frames in whichever window the
+grid does reach. Reproduced with a fixture built to land in the gap deliberately (70 calm
+frames + a 15-frame pan at the very end): 4.70% with only the grid's windows (picks
+`minterpolate`), 8.30% once the true final window is included (picks `rife`). Fixed by
+appending that window's start whenever the grid doesn't already include it. Unlike the two
+findings above, this one lives in `block_motion`, which the suite can and does exercise
+directly - mutation-tested the usual way: reverting the fix fails the new regression test
+and none of the others.

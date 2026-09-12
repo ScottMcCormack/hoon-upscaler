@@ -210,7 +210,16 @@ def block_motion(path, sample=None, window_s=1.0):
     # Half-window stride: a pan that straddles a window boundary still lands fully
     # inside at least one offset window, rather than being split and diluted in both.
     stride = max(1, win // 2)
-    starts = range(0, len(arr) - win + 1, stride)
+    starts = list(range(0, len(arr) - win + 1, stride))
+    # The stride grid does not necessarily land on the clip's last possible window: when
+    # (len(arr) - win) isn't a multiple of stride, the final up-to-(stride-1) values are
+    # never the SOLE content of any tried window, only ever diluted alongside earlier,
+    # calmer frames in the last window the grid does reach. A severe pan confined to
+    # exactly that tail is measured as a mix, not on its own - reproduced: a pan placed in
+    # the closing ~1s of a clip measured 4.70% (picks minterpolate) with only the grid's
+    # windows, against 8.30% (picks rife) once the true final window is included.
+    if starts[-1] != len(arr) - win:
+        starts.append(len(arr) - win)
     worst = max(float(arr[i:i + win].mean()) for i in starts)
     return worst / width
 
@@ -295,7 +304,14 @@ def interpolate(src, dst, target_fps=60.0, scale=1.0):
     # short count would otherwise leave a plausible partial file at the path a caller is
     # about to publish, which is exactly the failure the count check two lines below
     # exists to catch, just one step too late.
-    dst_tmp = dst + ".partial"
+    #
+    # The marker goes BEFORE the extension, not after: dst + ".partial" turns
+    # "i60_raw.mp4" into "i60_raw.mp4.partial", and ffmpeg's output muxer is inferred
+    # from the extension when none is given explicitly - reproduced directly, it refuses
+    # that path with "Unable to find a suitable output format" before writing a single
+    # frame. Splitting first keeps a real, recognised video extension on the temp file.
+    root, ext = os.path.splitext(dst)
+    dst_tmp = f"{root}.partial{ext}"
     sys.path.insert(0, RIFE_REPO)
     os.chdir(RIFE_REPO)
     from train_log.RIFE_HDv3 import Model
@@ -334,10 +350,18 @@ def interpolate(src, dst, target_fps=60.0, scale=1.0):
     # names as the cause of every prior wrong conclusion in this project. Larger on disk,
     # briefly, which is the cheaper resource here - not memory (streamed for that reason
     # already, see below) and not something that survives past finish.sh's next pass.
+    #
+    # libx264rgb, not libx264 with -pix_fmt yuv420p: crf 0 only makes the ENCODE step
+    # lossless relative to whatever pixel format it is handed, and yuv420p permanently
+    # subsamples chroma to a quarter of luma's resolution before that encode ever runs -
+    # measured directly: a yuv420p/crf-0 roundtrip of a test frame differs from the RGB
+    # source by up to 37/255 (mean 2.5), while an RGB-native (libx264rgb) roundtrip is
+    # bit-exact. libx264rgb keeps the model's own rgb24 output all the way through, which
+    # is the actual lossless intermediate this comment always claimed to produce.
     wr = subprocess.Popen(["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt",
                            "rgb24", "-s", f"{w}x{h}", "-r", f"{target_fps:g}", "-i", "-",
-                           "-c:v", "libx264", "-preset", "veryfast", "-crf", "0", "-pix_fmt",
-                           "yuv420p", dst_tmp], stdin=subprocess.PIPE)
+                           "-c:v", "libx264rgb", "-preset", "veryfast", "-crf", "0",
+                           dst_tmp], stdin=subprocess.PIPE)
     fsz = w * h * 3
 
     def read():

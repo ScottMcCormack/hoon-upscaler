@@ -129,9 +129,18 @@ def probe(path):
     # commonest bad input (a missing or non-video path) produced a raw traceback instead
     # of the SystemExit every other guard in this pipeline is tested against. Reproduced
     # here by accident while testing an unrelated change, which is how this was found.
+    #
+    # -count_frames/nb_read_frames, not -count_packets/nb_read_packets: this count feeds
+    # output_schedule() directly, and a packet is not guaranteed to be a decoded frame -
+    # ffmpeg does not promise a 1:1 mapping, so a container or codec that packs multiple
+    # frames into one packet (or splits one across several) would build the wrong
+    # schedule against a count interpolate()'s own decoder disagrees with, then either
+    # hold early or try to read past what the decoder actually produces. Every codec
+    # this pipeline's own encodes use (libx264, libx264rgb) matched 1:1 when checked
+    # directly, but a standalone caller can point this at anything.
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
-         "stream=width,height,r_frame_rate,nb_read_packets", "-count_packets",
+         "stream=width,height,r_frame_rate,nb_read_frames", "-count_frames",
          "-of", "csv=p=0", path], capture_output=True, text=True).stdout.strip()
     parts = out.split(",")
     if len(parts) != 4 or not all(parts[:2] + [parts[3]]):
@@ -477,34 +486,57 @@ def interpolate(src, dst, target_fps=60.0, scale=1.0):
     # A truncated interpolation still plays; only the frame count gives it away.
     if got != n_out:
         raise SystemExit(f"!! wrote {got} frames, expected {n_out}")
-    # interpolate() only ever changes VIDEO timing - the raw pipe to the encoder above
-    # carries no audio at all, so without this, the documented standalone `interpolate`
-    # CLI silently dropped every audio track. finish.sh never notices, because it remuxes
-    # the original source's audio into its own final deliverable regardless of what this
-    # function writes - but a direct caller publishing dst as-is got a silent picture.
+    publish_with_audio(dst_tmp, src, dst)
+    print(f"    {got} frames")
+
+
+def publish_with_audio(video_tmp, src, dst):
+    """Move video_tmp to dst, muxing in src's audio when it has any.
+
+    A standalone concern, kept out of interpolate() itself: interpolate() only ever
+    changes VIDEO timing - its own encoder never sees audio at all - so without this the
+    documented standalone `interpolate` CLI silently dropped every audio track.
+    finish.sh never notices, because it remuxes the ORIGINAL source's audio into its own
+    final deliverable regardless of what interpolate() writes, but a direct caller
+    publishing dst as-is got a silent picture.
+
+    Pulled out as its own function - unlike the rest of interpolate(), this needs no CUDA
+    torch or model to reach, so it can be exercised directly.
+    """
+    root, ext = os.path.splitext(dst)
     has_audio = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries",
          "stream=index", "-of", "csv=p=0", src], capture_output=True, text=True
     ).stdout.strip() != ""
-    if has_audio:
-        # Stream copy, not re-encode: the video is already final, and the audio is
-        # untouched by anything this function does, so copying is exact and free. Muxed
-        # into a second temp file, not into dst_tmp itself (ffmpeg cannot read and write
-        # the same path in one invocation) nor directly into dst (the same atomicity this
-        # function's own video write already needs - a failed mux must not leave a
-        # half-written file at the path a caller is about to publish).
-        dst_tmp2 = f"{root}.partial2{ext}"
+    if not has_audio:
+        os.replace(video_tmp, dst)
+        return
+    # Stream copy, not re-encode: the video is already final, and the audio is untouched
+    # by anything upstream of this, so copying is exact and free. Muxed into a second
+    # temp file, not into video_tmp itself (ffmpeg cannot read and write the same path in
+    # one invocation) nor directly into dst (the same atomicity interpolate()'s own video
+    # write already needs - a failed mux must not leave a half-written file at the path a
+    # caller is about to publish).
+    dst_tmp2 = f"{root}.partial2{ext}"
+    mux_rc = subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-i", video_tmp, "-i", src,
+         "-map", "0:v:0", "-map", "1:a:0", "-c", "copy", dst_tmp2]).returncode
+    if mux_rc != 0:
+        # The source audio codec is not always one the destination container accepts
+        # as-is - reproduced directly: pcm_u8 and wmav2 both refuse to mux into MP4 via
+        # stream copy ("codec not currently supported in container"). Losing an
+        # otherwise-complete, expensive interpolation to a container mismatch after the
+        # fact would be a worse failure than a lossy but universally-accepted re-encode,
+        # so retry with AAC before giving up.
         mux_rc = subprocess.run(
-            ["ffmpeg", "-v", "error", "-y", "-i", dst_tmp, "-i", src,
-             "-map", "0:v:0", "-map", "1:a:0", "-c", "copy", dst_tmp2]).returncode
-        os.remove(dst_tmp)
-        if mux_rc != 0:
-            raise SystemExit(f"!! muxing audio from {src} into {dst} failed "
-                             f"(ffmpeg exit {mux_rc})")
-        os.replace(dst_tmp2, dst)
-    else:
-        os.replace(dst_tmp, dst)
-    print(f"    {got} frames")
+            ["ffmpeg", "-v", "error", "-y", "-i", video_tmp, "-i", src,
+             "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy",
+             "-c:a", "aac", "-b:a", "128k", dst_tmp2]).returncode
+    os.remove(video_tmp)
+    if mux_rc != 0:
+        raise SystemExit(f"!! muxing audio from {src} into {dst} failed "
+                         f"(ffmpeg exit {mux_rc}), even after transcoding to AAC")
+    os.replace(dst_tmp2, dst)
 
 
 def recommendation(m):

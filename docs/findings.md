@@ -42,6 +42,7 @@ one without listing it here fails the suite.
 - [The schedule's own target was one frame-duration short of the clip's real length, 2026-09-12](#the-schedules-own-target-was-one-frame-duration-short-of-the-clips-real-length-2026-09-12)
 - [A downsampling request would close the decoder's pipe before it finished writing, 2026-09-12](#a-downsampling-request-would-close-the-decoders-pipe-before-it-finished-writing-2026-09-12)
 - [The standalone interpolation CLI silently dropped every audio track, 2026-09-12](#the-standalone-interpolation-cli-silently-dropped-every-audio-track-2026-09-12)
+- [A packet count is not a frame count, and a container can refuse a codec outright, 2026-09-12](#a-packet-count-is-not-a-frame-count-and-a-container-can-refuse-a-codec-outright-2026-09-12)
 
 **Grading**
 
@@ -1679,3 +1680,42 @@ and vendored weights this environment does not have.** Verified what could be ve
 without one: the exact ffmpeg mux and audio-detection commands, run directly against real
 fixture files built for this purpose, confirmed to produce the expected result in both the
 with-audio and without-audio cases.
+
+## A packet count is not a frame count, and a container can refuse a codec outright, 2026-09-12
+
+**`probe()` counted DEMUXED PACKETS (`nb_read_packets`), but `output_schedule` needs a
+DECODED FRAME count, and ffmpeg does not promise the two are equal.** A container or codec
+that packs more than one frame into a packet, or splits one across several, would build a
+schedule against a number `interpolate()`'s own decoder disagrees with - it might then hold
+early or try to read past what the decoder actually produces, echoing the broken-pipe
+finding two entries above but for a completely different, harder-to-guess reason. Tried
+hard to reproduce actual divergence before deciding how far to take the fix: libx264,
+libx265, mjpeg, mpeg4, and a raw Annex-B elementary stream all measured identically by
+either method in this environment. Fixed anyway, since the tools this pipeline's own
+encodes use matching by coincidence is not the same claim as the two counts being
+guaranteed equal, which they are not: switched to `-count_frames`/`nb_read_frames`, which
+ffprobe documents as the frame-accurate count, confirmed identical output shape and guard
+behaviour on every existing fixture. Not mutation-tested, for once by necessity rather than
+by the usual CUDA boundary - without a fixture where the two counts actually differ, no
+version of this code can be made to fail the way the fix is meant to prevent.
+
+**Stream-copying the source's audio into the output container can fail outright, and it
+used to do so only after the whole (expensive, in the real model-backed path) interpolation
+had already succeeded.** Reproduced directly: `pcm_u8` and `wmav2` audio both refuse to mux
+into an MP4 container via stream copy - "codec not currently supported in container" - while
+AAC, and even less-common-but-still-standard codecs like Opus, muxed in without complaint on
+the ffmpeg build this environment has. Losing an otherwise-complete render to a container
+mismatch discovered only at the very last step is a worse failure than a lossy but
+universally-accepted re-encode, so the fix retries with AAC before giving up rather than
+failing on the first attempt.
+
+**Pulled the whole audio-publishing step out of `interpolate()` into its own function,
+`publish_with_audio()`, specifically to make it testable.** Everything else this round
+touched inside `interpolate()` could only be verified by direct ffmpeg reproduction outside
+the function, because reaching the function at all needs a CUDA torch and vendored model
+weights this environment doesn't have. This step never touches the model - it only needs
+`ffprobe`/`ffmpeg` and two file paths - so extracting it means the fallback behaviour can be
+exercised for real, not just reasoned about. Three fixtures: a source with no audio (video
+passes through untouched), a source with AAC audio (stream-copied, codec unchanged), and a
+source with `pcm_u8` audio (falls back to AAC). Mutation-tested: removing the AAC retry
+fails exactly the third case and none of the others.

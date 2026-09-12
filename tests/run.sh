@@ -848,6 +848,63 @@ PY
   assert_eq "interp: an equal source and target rate is still accepted" \
     "10" "$(python -c "import sys;sys.path.insert(0,'$REPO/pipeline');import rife;print(len(rife.output_schedule(10, 15, 15)))")"
 
+  # publish_with_audio() is interpolate()'s own audio-muxing tail, pulled out on purpose:
+  # unlike the rest of interpolate(), it needs no CUDA torch or model to reach, so it can
+  # be exercised directly against real ffmpeg fixtures instead of only reasoned about.
+  AUDIOVID="$W/audiovid_only.mp4"
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=s=64x64:r=60:d=1" \
+    -c:v libx264 -crf 18 -pix_fmt yuv420p "$AUDIOVID"
+
+  # No audio in the source: the video passes through untouched, no audio stream appears.
+  NOAUDIO_SRC="$W/noaudio_src.mp4"
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=s=64x64:r=15:d=1" \
+    -c:v libx264 -crf 18 -pix_fmt yuv420p "$NOAUDIO_SRC"
+  cp "$AUDIOVID" "$W/pub_noaudio.mp4"
+  python -c "
+import sys; sys.path.insert(0, '$REPO/pipeline')
+import rife
+rife.publish_with_audio('$W/pub_noaudio.mp4', '$NOAUDIO_SRC', '$W/pub_noaudio_out.mp4')
+"
+  assert_eq "interp: publish_with_audio passes video through untouched when the source has no audio" \
+    "video" "$(ffprobe -v error -show_entries stream=codec_type -of csv=p=0 "$W/pub_noaudio_out.mp4" | tr '\n' ',' | sed 's/,$//')"
+
+  # A source whose audio the destination container accepts as-is: stream-copied, not
+  # re-encoded - the codec name survives unchanged.
+  AAC_SRC="$W/aac_src.mp4"
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=s=64x64:r=15:d=1" \
+    -f lavfi -i "sine=frequency=440:duration=1" -c:v libx264 -crf 18 -pix_fmt yuv420p \
+    -c:a aac "$AAC_SRC"
+  cp "$AUDIOVID" "$W/pub_aac.mp4"
+  python -c "
+import sys; sys.path.insert(0, '$REPO/pipeline')
+import rife
+rife.publish_with_audio('$W/pub_aac.mp4', '$AAC_SRC', '$W/pub_aac_out.mp4')
+"
+  assert_eq "interp: publish_with_audio stream-copies audio the container already accepts" \
+    "aac" "$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$W/pub_aac_out.mp4")"
+
+  # A source whose audio codec MP4 flatly refuses via stream copy - reproduced directly
+  # before writing this: ffmpeg exits nonzero muxing raw pcm_u8 into an MP4 container
+  # ("codec not currently supported in container"). publish_with_audio must still
+  # succeed, by falling back to an AAC re-encode, not lose the (expensive, in the real
+  # caller) video to a container mismatch.
+  PCM_SRC="$W/pcm_src.mka"
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "sine=frequency=440:duration=1" \
+    -c:a pcm_u8 "$PCM_SRC"
+  cp "$AUDIOVID" "$W/pub_pcm.mp4"
+  PUB_PCM_LOG="$(python -c "
+import sys; sys.path.insert(0, '$REPO/pipeline')
+import rife
+rife.publish_with_audio('$W/pub_pcm.mp4', '$PCM_SRC', '$W/pub_pcm_out.mp4')
+" 2>&1)"
+  if [ -f "$W/pub_pcm_out.mp4" ] && \
+     [ "$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$W/pub_pcm_out.mp4")" = "aac" ]; then
+    ok "interp: publish_with_audio falls back to AAC when the source codec cannot be stream-copied"
+  else
+    bad "interp: publish_with_audio falls back to AAC when the source codec cannot be stream-copied" \
+        "$PUB_PCM_LOG"
+  fi
+
   # Motion after the first 400 frames must still count. The old default measured only the
   # opening, so a clip that is static early and pans later was recommended minterpolate -
   # exactly the footage this tool exists to catch.

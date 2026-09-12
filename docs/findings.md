@@ -44,6 +44,7 @@ one without listing it here fails the suite.
 - [The standalone interpolation CLI silently dropped every audio track, 2026-09-12](#the-standalone-interpolation-cli-silently-dropped-every-audio-track-2026-09-12)
 - [A packet count is not a frame count, and a container can refuse a codec outright, 2026-09-12](#a-packet-count-is-not-a-frame-count-and-a-container-can-refuse-a-codec-outright-2026-09-12)
 - [My own audio fix cost the pipeline a redundant remux, and could delete a finished render, 2026-09-12](#my-own-audio-fix-cost-the-pipeline-a-redundant-remux-and-could-delete-a-finished-render-2026-09-12)
+- [The stride grid's blind spot was never only at the tail, 2026-09-12](#the-stride-grids-blind-spot-was-never-only-at-the-tail-2026-09-12)
 
 **Grading**
 
@@ -1748,3 +1749,43 @@ Both findings live in `publish_with_audio()`, which the previous round had alrea
 out of `interpolate()` specifically because it needs no CUDA torch or model to reach -
 that decision is what let both of these be caught with real fixtures instead of only
 reasoned about, the same as the round that introduced the function.
+
+## The stride grid's blind spot was never only at the tail, 2026-09-12
+
+**Fixing the stride grid's gap at the clip's tail two rounds ago fixed one instance of a
+general defect, not the defect itself.** `block_motion`'s windowed statistic sampled window
+starts at a stride (half the window width) rather than every possible position. At
+`win=15, stride=7`, a pan landing 3 or 4 samples past a multiple of 7 is only ever seen by
+the two windows straddling it, both diluting it with samples outside the pan - proven
+directly on a synthetic array (not merely argued): a window checking every start finds the
+`10.0` a hand-built "hot" region actually contains, while the stride grid's best answer on
+the exact same array is `8.0`, provably diluted. The earlier fix only ever tried the clip's
+very last possible window in addition to the strided ones, which happens to catch the case
+where the grid runs out of clip before it runs out of stride - but the identical dilution
+can occur at any interior offset the grid skips, and fixing only the tail while leaving
+every interior position exposed was the "standard applied once" pattern `CLAUDE.md` warns
+against by name.
+
+**Fixed by replacing the stride grid with a true sliding-window maximum, computed via a
+cumulative sum in the same O(n) the strided version cost.** `windowed_max_mean(arr, win)`
+checks literally every possible start, so there is no grid left to fall between - and the
+tail-specific special case from two rounds ago is now redundant (a full scan already
+includes the last possible window) and was removed rather than kept alongside the general
+fix. Pulled out as its own pure function specifically so it could be tested without a
+video or optical flow at all, the same reasoning `output_schedule()` already demonstrated
+for the schedule itself - proving the fix meant building one synthetic array with the
+"hot" region at the worst possible offset, not searching for a real clip and pan speed
+where the effect happens to survive real-world optical-flow noise at the needed precision
+(tried first; the margin an interior position allows is much narrower than the tail's, and
+real footage kept the noise from a clean transition dominating the signal at that scale).
+Mutation-tested: reverting to the stride grid fails this test and none of the others.
+
+**Recalibrated MOTION_THRESHOLD's own documentation against the new statistic, since
+switching to a true maximum can only ever raise (never lower) a clip's measured value.**
+Re-measured both calibration renders: N90 moved from 3.27% to 3.36% (the interior-position
+fix found a slightly worse window than the strided grid previously had), MVI_0081 stayed
+at 9.95% (its worst window was apparently already on the old grid). `MOTION_THRESHOLD`
+itself did not need to move - 6% still sits comfortably between both figures - but the
+comment, module docstring, `CLAUDE.md`, and `README.md` all still cited the old 3.27%,
+and were updated to the re-measured 3.36% rather than left to drift, the way earlier
+rounds' calibration numbers were found to have done.

@@ -928,6 +928,28 @@ rife.publish_with_audio('$W/pub_bothfail.mp4', '$AAC_SRC', '$W/no_such_dir/out.m
     ok "interp: publish_with_audio preserves the video when both mux attempts fail"
   fi
 
+  # A SUCCESSFUL mux is not the same fact as the final publish succeeding - os.replace()
+  # itself can still fail (dst already exists as a directory, a different filesystem,
+  # permissions). video_tmp must survive that too, not just a failed mux. Forced by
+  # pointing dst at an existing directory: the mux into dst_tmp2 succeeds cleanly (a
+  # normal AAC source), only the final os.replace(dst_tmp2, dst) fails.
+  cp "$AUDIOVID" "$W/pub_replacefail.mp4"
+  mkdir -p "$W/dst_is_a_dir.mp4"
+  PUB_REPLACEFAIL_LOG="$(python -c "
+import sys; sys.path.insert(0, '$REPO/pipeline')
+import rife
+rife.publish_with_audio('$W/pub_replacefail.mp4', '$AAC_SRC', '$W/dst_is_a_dir.mp4')
+" 2>&1)"; PUB_REPLACEFAIL_RC=$?
+  if [ "$PUB_REPLACEFAIL_RC" -eq 0 ]; then
+    bad "interp: publish_with_audio preserves the video when the final publish fails" \
+        "expected a nonzero exit, got 0"
+  elif [ ! -f "$W/pub_replacefail.mp4" ]; then
+    bad "interp: publish_with_audio preserves the video when the final publish fails" \
+        "video_tmp was deleted despite the final os.replace() failing: $PUB_REPLACEFAIL_LOG"
+  else
+    ok "interp: publish_with_audio preserves the video when the final publish fails"
+  fi
+
   # Motion after the first 400 frames must still count. The old default measured only the
   # opening, so a clip that is static early and pans later was recommended minterpolate -
   # exactly the footage this tool exists to catch.
@@ -987,6 +1009,42 @@ PY
   TAILPAN_REC="$(python "$REPO/pipeline/rife.py" recommend "$TAILPAN" 2>/dev/null)"
   assert_eq "interp: a severe pan confined to the clip's closing second still selects rife" \
     "rife" "$TAILPAN_REC"
+
+  # The same dilution the tail fix above addressed can happen at ANY interior offset the
+  # stride grid skips over, not just at the clip's end - a stride-7 grid over a win-15
+  # window never tries a start 3 or 4 past a multiple of 7, so a pan landing exactly
+  # there is only ever seen diluted by whichever neighbouring grid window it straddles.
+  # Tested on a plain array, not a rendered clip: windowed_max_mean() is block_motion's
+  # own windowing pulled out as a pure function specifically so this needs no video or
+  # optical flow to pin, the same reasoning behind output_schedule() being separable.
+  # A synthetic array with one exact win-length "hot" region at that worst offset proves
+  # it directly - the strided approach (this project's own previous code, reproduced
+  # here rather than assumed) finds only 8.0, diluted by six calm samples it cannot avoid
+  # from the nearest grid window; scanning every start finds the true 10.0.
+  WMM_CHECK="$(python -c "
+import sys; sys.path.insert(0, '$REPO/pipeline')
+import numpy as np
+import rife
+
+win, stride = 15, 7
+arr = np.zeros(100)
+pan_start = 24  # 24 = 3*7 + 3: three past the nearest grid start, the worst offset
+arr[pan_start:pan_start + win] = 10.0
+
+new = rife.windowed_max_mean(arr, win)
+
+starts = list(range(0, len(arr) - win + 1, stride))
+if starts[-1] != len(arr) - win:
+    starts.append(len(arr) - win)
+old = max(arr[i:i + win].mean() for i in starts)
+
+if abs(new - 10.0) < 1e-9 and abs(old - 8.0) < 1e-9:
+    print('ok')
+else:
+    print(f'bad: new={new} (want 10.0), old={old} (want 8.0, confirming the old gap is real)')
+")"
+  assert_eq "interp: windowed_max_mean finds a pan at any interior offset, not only ones the old stride grid tried" \
+    "ok" "$WMM_CHECK"
 
   # A partial setup must not pass. interpolate() does `from train_log.RIFE_HDv3 import
   # Model`, so weights alone are not enough: the old check looked only for flownet.pkl and

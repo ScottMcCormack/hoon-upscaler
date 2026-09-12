@@ -6,7 +6,7 @@ WHY THIS EXISTS
 `minterpolate` searches for each block's motion within `search_param` pixels, default 32.
 That was never sized against footage that pans. Measured per-frame block motion:
 
-    N90 clip (minterpolate fine)      windowed  3.27% of frame width
+    N90 clip (minterpolate fine)      windowed  3.36% of frame width
     MVI_0081, Canon (glassy)          windowed  9.95% of frame width
 
 Measured on the actual `_lumafix_14fps.mp4` renders finish.sh passes to recommend() - not
@@ -101,7 +101,7 @@ import sys
 # statistic block_motion now uses (a single clip-wide p95 let a real, severe pan hide
 # below the threshold whenever it was under ~5% of the clip's total length - see
 # block_motion's docstring):
-#     N90 clip (minterpolate fine)    3.27% windowed max, full 1556-frame render
+#     N90 clip (minterpolate fine)    3.36% windowed max, full 1556-frame render
 #     MVI_0081 (glassy)               9.95% windowed max, full 852-frame render
 # A 3.0x gap, wider than the un-windowed statistic's on the same renders (2.12% to
 # 5.28%, a 2.5x gap) - windowing raises the floor for a clip that is MOSTLY calm with
@@ -228,24 +228,37 @@ def block_motion(path, sample=None, window_s=1.0):
         raise SystemExit(f"!! {path}: frame width is zero, cannot normalise motion")
     arr = np.array(vals)
     win = max(1, int(round(window_s * fps)))
+    return windowed_max_mean(arr, win) / width
+
+
+def windowed_max_mean(arr, win):
+    """The highest mean of any length-`win` contiguous slice of `arr`.
+
+    Pulled out of block_motion() as its own pure function so this can be tested against
+    plain arrays - no video, no OpenCV, no optical flow - the same reasoning that already
+    applies to output_schedule().
+
+    EVERY possible window start is checked, not a stride-sampled subset. A half-window
+    stride (the previous approach) still leaves gaps a pan can fall into: with win=15 and
+    stride=7, a 15-sample pan starting at an array index 3 or 4 past a multiple of 7 is
+    only ever seen by the two windows straddling it, and BOTH dilute it with samples from
+    outside the pan - proven directly (not just plausible) by checking every possible
+    start against the strided subset on a synthetic array built to land exactly on that
+    offset: the strided approach's best answer is real, but demonstrably not the best
+    ANY window achieves. A dedicated fix for the clip's tail (always trying the last
+    possible start) caught the specific case where the strided grid runs out of clip
+    before it runs out of stride, but the same dilution can happen at ANY interior offset
+    the grid skips over - fixing it only at the tail was the "standard applied once" trap
+    CLAUDE.md names. A cumulative-sum sliding mean costs the same O(n) the strided version
+    did and checks literally every start, so there is no grid left to fall between.
+    """
+    import numpy as np
     if len(arr) <= win:
         # Shorter than one window - nothing to slide, the clip IS the window.
-        return float(arr.mean()) / width
-    # Half-window stride: a pan that straddles a window boundary still lands fully
-    # inside at least one offset window, rather than being split and diluted in both.
-    stride = max(1, win // 2)
-    starts = list(range(0, len(arr) - win + 1, stride))
-    # The stride grid does not necessarily land on the clip's last possible window: when
-    # (len(arr) - win) isn't a multiple of stride, the final up-to-(stride-1) values are
-    # never the SOLE content of any tried window, only ever diluted alongside earlier,
-    # calmer frames in the last window the grid does reach. A severe pan confined to
-    # exactly that tail is measured as a mix, not on its own - reproduced: a pan placed in
-    # the closing ~1s of a clip measured 4.70% (picks minterpolate) with only the grid's
-    # windows, against 8.30% (picks rife) once the true final window is included.
-    if starts[-1] != len(arr) - win:
-        starts.append(len(arr) - win)
-    worst = max(float(arr[i:i + win].mean()) for i in starts)
-    return worst / width
+        return float(arr.mean())
+    cumsum = np.cumsum(np.insert(arr, 0, 0.0))
+    window_sums = cumsum[win:] - cumsum[:-win]
+    return float(window_sums.max()) / win
 
 
 def output_schedule(n_src, src_fps, target_fps=60.0):
@@ -547,17 +560,18 @@ def publish_with_audio(video_tmp, src, dst):
             ["ffmpeg", "-v", "error", "-y", "-i", video_tmp, "-i", src,
              "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy",
              "-c:a", "aac", "-b:a", "128k", dst_tmp2]).returncode
-    # video_tmp is kept until the mux is confirmed to have succeeded, not deleted
-    # unconditionally beforehand - if both attempts fail (a full disk, a muxer that also
-    # refuses AAC), that file is the only copy of an otherwise-complete interpolation,
-    # and this is the last point at which it still exists to be recovered.
+    # video_tmp is kept until dst is confirmed published, not deleted the moment the mux
+    # succeeds - the mux producing a good dst_tmp2 is not the same fact as os.replace()
+    # actually landing it at dst (dst can be an existing directory, on a different
+    # filesystem, or otherwise unwritable), and until that replace lands, video_tmp is
+    # still the only recoverable copy of an otherwise-complete interpolation.
     if mux_rc != 0:
         raise SystemExit(
             f"!! muxing audio from {src} into {dst} failed (ffmpeg exit {mux_rc}), "
             f"even after transcoding to AAC. The completed video-only interpolation is "
             f"preserved at {video_tmp} - move it into place manually, or retry.")
-    os.remove(video_tmp)
     os.replace(dst_tmp2, dst)
+    os.remove(video_tmp)
 
 
 def recommendation(m):

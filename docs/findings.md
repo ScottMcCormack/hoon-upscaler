@@ -80,6 +80,7 @@ one without listing it here fails the suite.
 - [Scanning every frame did not close the hole it was supposed to, 2026-09-08](#scanning-every-frame-did-not-close-the-hole-it-was-supposed-to-2026-09-08)
 - [Reviewing my own work found what the reviewers had already fixed, 2026-09-08](#reviewing-my-own-work-found-what-the-reviewers-had-already-fixed-2026-09-08)
 - [The empty-argument guard reached two of three positionals, 2026-09-12](#the-empty-argument-guard-reached-two-of-three-positionals-2026-09-12)
+- [A third recurrence retired the hardcoded line number instead of re-verifying it again, 2026-09-12](#a-third-recurrence-retired-the-hardcoded-line-number-instead-of-re-verifying-it-again-2026-09-12)
 
 ## Pre-filters — roughly twenty variants, all unnecessary in the end
 
@@ -2178,3 +2179,22 @@ it only checked content the range still included either way.
 
 Both mutation-tested independently by reverting each fix and confirming only its own test
 failed. 45 tests pass (was 43).
+
+## A third recurrence retired the hardcoded line number instead of re-verifying it again, 2026-09-12
+
+**The `--help` line range was fixed to two line numbers, and this is the third time that
+has been the actual defect - twice as the bug, once (above) as the fix that only re-pinned
+it rather than removing it.** Follow-up review pointed out that `2,25p` is exactly as
+fragile as `2,20p` and `2,23p` were: correct today, silently wrong the next time a line is
+added or removed from the docstring above it, with nothing to notice. The test added above
+would have caught the NEXT instance of the old failure mode, but not prevented it -
+catching a regression after the fact is not the same as removing the class of regression.
+
+**Fixed by selecting through the closing `# ====` separator instead of a line number:**
+`sed -n '2,/^# ====/{/^# ====/!p}'` finds the range's own end at read time, so it moves on
+its own when the docstring changes shape - there is no number left to fall out of sync.
+Verified directly rather than assumed: a new test builds a patched copy of the script with
+an extra usage line inserted just before the closing separator (standing in for a real
+future docstring edit, without waiting for one to actually happen) and confirms `--help`
+still shows it, with no accompanying change to the selection logic itself. Mutation-tested:
+reverting to the fixed-range form fails exactly this new test and no other.

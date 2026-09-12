@@ -27,12 +27,12 @@
 set -euo pipefail
 case "${1:-}" in
   -h|--help)
-    # 2,25 so the named-clip usage example (line 25) is included - this range moves
-    # whenever a line is added or removed above it in the docstring, which has already
-    # bitten this exact line once (it stopped at 20, cutting --help off before the CLIP
-    # usage example two lines below that). Verified against the actual line count rather
-    # than assumed correct after editing the Output section above it.
-    sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
+    # Selected through the closing "# ====" separator rather than a hardcoded line
+    # number, so the range moves on its own when the docstring above it grows or shrinks.
+    # A fixed endpoint has already cut usage lines off twice before (it stopped at 20,
+    # then at 23, each time one edit behind the docstring above it) - review caught both,
+    # but a range that cannot go stale is better than one re-verified by hand each time.
+    sed -n '2,/^# ====/{/^# ====/!p}' "$0" | sed 's/^# \{0,1\}//'
     exit 0 ;;
 esac
 # Reject extra arguments rather than ignoring them: a mistyped invocation should say so,

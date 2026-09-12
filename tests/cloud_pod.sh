@@ -256,17 +256,40 @@ fi
 
 # The no-CLIP output section named only sr_out_<res>.mp4, omitting that test mode (the
 # invocation --help itself recommends running first) writes sr_test_<res>.mp4 instead -
-# a caller following that advice would not know which file to download. Also pins the
-# usage block's own line range: it is a hardcoded `sed -n` slice of this file, which has
-# already cut usage lines off once before when the docstring above it grew and the range
-# was not updated to match - checking for the LAST usage line (the named-clip example)
-# catches that regression even though "test_15s.mp4" alone would not.
+# a caller following that advice would not know which file to download. Also checks for
+# the LAST usage line (the named-clip example), which a truncated range - this exact
+# script's docstring has been cut short twice before - would drop even though
+# "test_15s.mp4" alone would not notice.
 if [[ "$HELP" == *"sr_test_"* ]] && [[ "$HELP" == *"mvi0081"* ]]; then
   ok "--help documents the test-mode output name and is not truncated"
 else
   bad "--help documents the test-mode output name and is not truncated" \
       "sr_test_ present: $([[ "$HELP" == *sr_test_* ]] && echo yes || echo no), mvi0081 present: $([[ "$HELP" == *mvi0081* ]] && echo yes || echo no)"
 fi
+
+# --help's range is now selected through the closing "# ====" separator rather than a
+# hardcoded line number, precisely so a future docstring edit cannot repeat the last two
+# incidents. Proved directly: a patched copy of the script with an extra usage line
+# inserted just before that separator (standing in for a real future edit, without
+# waiting for one) must still show that line in --help, with no line-count fix needed
+# alongside it.
+GROWNCOPY="$W/run_on_pod_grown.sh"; cp "$CLOUD/run_on_pod.sh" "$GROWNCOPY"
+python - "$GROWNCOPY" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+old = '#         bash run_on_pod.sh 720 test mvi0081       # a second source, namespaced\n'
+new = old + '#         bash run_on_pod.sh 720 test mvi0081 --dry-run  # a hypothetical future option\n'
+assert s.count(old) == 1, f"anchor matched {s.count(old)} times"
+open(p, "w").write(s.replace(old, new))
+PY
+GROWNHELP="$(bash "$GROWNCOPY" --help 2>&1)"
+case "$GROWNHELP" in
+  *"a hypothetical future option"*)
+    ok "--help's range adapts when the docstring grows, with no line-count fix needed" ;;
+  *) bad "--help's range adapts when the docstring grows, with no line-count fix needed" \
+         "new usage line missing: $(printf '%s' "$GROWNHELP" | tail -3)" ;;
+esac
 
 # Overriding batch upward is legitimate — it is how the 720p master gets reproduced on a
 # smaller card — but it walks toward the VRAM cliff, so it must say so.

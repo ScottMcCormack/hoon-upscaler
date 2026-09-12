@@ -5,7 +5,7 @@
 # AGPL-3.0 obligations. See NOTICE.
 #
 # This path is also not runnable as shipped: it needs a 1408x1152 "STABFIRST"
-# intermediate that no step in this repository produces. See README.
+# intermediate that no step in this repository produces. See docs/pipeline.md.
 #
 # torch here is the CPU build, which is enough for detection on this footage. For GPU,
 # install torch from the index matching your CUDA — on Blackwell (RTX 50-series) that

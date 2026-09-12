@@ -10,7 +10,7 @@
 # 3.14 has no numpy or opencv wheels yet.
 #
 # ffmpeg and ffprobe are also required and are NOT pip-installable. The stabilise step
-# needs a build carrying the vidstab filters — see README.
+# needs a build carrying the vidstab filters — see docs/setup.md.
 
 numpy==2.5.2
 opencv-contrib-python-headless==5.0.0.93

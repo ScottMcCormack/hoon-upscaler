@@ -353,6 +353,69 @@ print("ok" if not out else "bad: " + " | ".join(out))
 PY
 )"
   assert_eq "repository: the findings index lists every section" "ok" "$IDX"
+  # The README is now a front door that delegates to docs/, so most of its substance is
+  # reached through a relative link. A broken one is silent - GitHub renders it as
+  # ordinary text and the reader simply never arrives - and renaming a doc breaks several
+  # at once. Objective and cheap to assert, unlike anything about whether the prose reads
+  # well.
+  #
+  # A #fragment is checked too, not just the file it points at - stripping it and calling
+  # the file's existence "resolves" only proves the target document exists, not that the
+  # specific heading does. Renaming a heading (or a typo in the link) would leave a link
+  # that still "resolves" by this weaker definition while landing the reader at the top of
+  # the wrong document, or - for a same-document `#foo` link - going nowhere at all. Those
+  # were skipped entirely before (the old regex treated anything starting with "#" as
+  # already handled), so they were never checked either. Fragments are matched against
+  # GitHub's actual heading-slug algorithm (lowercase, strip everything but word
+  # characters/spaces/hyphens, each remaining space becomes its own hyphen - consecutive
+  # spaces become consecutive hyphens, not one) rather than the heading's raw text, and
+  # against every markdown file a fragment could target, not just the doc set the
+  # first-party-only check above cares about.
+  LINKS="$(python - "$REPO" <<'LINKCHECK'
+import pathlib, re, sys
+repo = pathlib.Path(sys.argv[1])
+
+def slugify(heading):
+    heading = re.sub(r"`([^`]*)`", r"\1", heading)
+    heading = re.sub(r"\*\*([^*]*)\*\*", r"\1", heading)
+    heading = re.sub(r"\*([^*]*)\*", r"\1", heading)
+    heading = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", heading)
+    heading = heading.lower()
+    heading = re.sub(r"[^\w\s-]", "", heading)
+    heading = re.sub(r"\s", "-", heading)
+    return heading
+
+_slug_cache = {}
+def heading_slugs(md_path):
+    if md_path not in _slug_cache:
+        seen = {}
+        slugs = set()
+        for h in re.findall(r"^#{1,6} (.+)$", md_path.read_text(), flags=re.M):
+            s = slugify(h)
+            n = seen.get(s, 0)
+            seen[s] = n + 1
+            slugs.add(s if n == 0 else f"{s}-{n}")
+        _slug_cache[md_path] = slugs
+    return _slug_cache[md_path]
+
+bad = []
+docs = [repo / "README.md", repo / "CONTRIBUTING.md"] + sorted((repo / "docs").glob("*.md"))
+for md in docs:
+    for _text, target in re.findall(r"\[([^\]]+)\]\(([^)]+)\)", md.read_text()):
+        if re.match(r"^(https?:|mailto:)", target):
+            continue
+        path, _, frag = target.partition("#")
+        target_doc = md if not path else (md.parent / path)
+        if not target_doc.exists():
+            bad.append(f"{md.relative_to(repo)} -> {target} (no such file)")
+            continue
+        if frag and target_doc.suffix == ".md" and frag not in heading_slugs(target_doc):
+            bad.append(f"{md.relative_to(repo)} -> {target} (no such heading)")
+print("ok" if not bad else "bad: " + "; ".join(sorted(bad)[:4]))
+LINKCHECK
+)"
+  assert_eq "repository: every relative doc link and anchor resolves" "ok" "$LINKS"
+
   # A directory exclusion cannot be undone by a ! negation, and this went unnoticed
   # through the whole founding PR — both READMEs were ignored and never committed.
   for f in masters/README.md experiments/README.md; do

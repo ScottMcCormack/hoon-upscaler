@@ -2,52 +2,59 @@
 
 [![tests](https://github.com/ScottMcCormack/hoon-upscaler/actions/workflows/tests.yml/badge.svg)](https://github.com/ScottMcCormack/hoon-upscaler/actions/workflows/tests.yml)
 
-AI restoration pipeline for degraded handheld video — stabilisation, SeedVR2 upscaling,
-frame-timing repair and selective interpolation.
+**Bring a 2007 phone video back to life.** This is an AI restoration pipeline for degraded
+handheld footage — stabilisation, SeedVR2 upscaling, frame-timing repair and selective
+interpolation.
 
-Built for a 2007 Nokia N90 clip (352×288, 15fps VFR, mpeg4 @ 509kbps) of a burnout at a
-Perth speedway. Output is 1080p60. The recipe generalises to other low-resolution phone
-and camcorder footage.
+It was built for one clip: a burnout at a Perth speedway, shot on a Nokia N90 at 352×288,
+15fps, in heavily compressed mpeg4. It comes out at 1080p60. The recipe generalises to
+other low-resolution phone and camcorder footage.
 
-## Before / after
+## See it
 
 https://github.com/user-attachments/assets/96040f7b-cb6d-46a3-b7f1-a49a5599fa9e
 
-Top: the 312×176 source, nearest-neighbour scaled — no smoothing, so nothing is
-flattered. Bottom: the restored 1080p60 output. Thirty seconds from 0:24.
+Top: the 312×176 source, nearest-neighbour scaled — no smoothing, so nothing is flattered.
+Bottom: the restored 1080p60 output. Thirty seconds from 0:24.
 
-The lower panel is **reconstructed, not recovered**. See
-[A note on what this produces](#a-note-on-what-this-produces).
+## What makes this different
 
-## The pipeline
+Most upscaling is one model call. Almost all of the work here is in the four steps around
+it, and each one exists because something was visibly wrong without it:
+
+- **Timing is restored, not resampled.** The camera shot variable frame rate. Extract at a
+  constant rate and a 267ms stall replays in 70ms — the car appears to teleport. The
+  pipeline rebuilds the real per-frame cadence from the source's own timestamps.
+- **Interpolation knows about the stalls.** Going to 60fps naively invents motion across
+  gaps where the camera simply stopped. The selective pass interpolates ordinary gaps and
+  *holds* through the stalls.
+- **The grade is measured, not hardcoded.** A fixed grade is only right for footage that
+  sits where it was tuned — one clipped **51.8%** of a daylight clip to flat white. The
+  grade is picked from the clip and then verified against the ungraded render.
+- **No pre-filter, deliberately.** Denoising before the model helped Real-ESRGAN and badly
+  hurt SeedVR2, which is trained on degraded input and wants the artifacts left in.
+
+The reasoning behind each, and the things that did not work, are in
+[docs/findings.md](docs/findings.md).
+
+## How it works
 
 ```
 source (352×288, VFR, heavily compressed)
   │
   ├─ 1. stabilise          vidstab, translation only (maxangle=0), no crop
   ├─ 2. crop               remove fine mesh / clutter; fixes framing to 16:9
-  ├─ 3. (no pre-filter)    deliberately — see CLAUDE.md
+  ├─ 3. (no pre-filter)    deliberately
   ├─ 4. SeedVR2 upscale    3B fp16, resolution 1080, batch 33, overlap 5
   ├─ 5. luma stabilise     removes the camera's auto-exposure hunting
-  ├─ 6. restore cadence    rebuild per-frame durations (±13ms, see #2)
+  ├─ 6. restore cadence    rebuild the source's real per-frame timing
   ├─ 7. grade              preset picked from the clip's own luma, then verified
   └─ 8. selective 60fps    interpolator picked from measured motion; holds through stalls
 ```
 
-Steps 5-8 are automated by `pipeline/finish.sh`.
+Steps 5-8 run as one command. [docs/pipeline.md](docs/pipeline.md) walks through all eight.
 
-Step 8 picks its interpolator by measurement. On a fast pan, newly revealed content has no
-correspondence in the previous frame, so `minterpolate`'s block compensation stretches
-neighbours into it and the picture flows rather than moves — fine on near-static footage
-(3.36% of frame width, windowed block motion, measured on the actual render `finish.sh`
-thresholds), visibly wrong on a clip that pans (9.95%). Raising the search range does not
-help — the search window is a ruled-out hypothesis, not
-the cause; block motion is used as a proxy because it tracks the real mechanism, fast
-panning, without measuring it directly. RIFE synthesises those regions instead.
-`INTERP=minterpolate|rife|auto`
-overrides the choice, and RIFE needs a one-off setup described in `pipeline/rife.py`.
-
-## Setup
+## Quick start
 
 ```bash
 git clone https://github.com/ScottMcCormack/hoon-upscaler.git
@@ -56,181 +63,46 @@ python3.12 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Python 3.12, not 3.14 — neither numpy nor opencv ships a cp314 wheel yet.
+You also need `ffmpeg` **built with vidstab**, and a SeedVR2 checkout beside this one —
+[docs/setup.md](docs/setup.md) has both, and takes about fifteen minutes.
 
-`requirements.txt` is the core pipeline only. The experimental reframing path needs
-`requirements-reframe.txt`, which pulls in `ultralytics` (**AGPL-3.0** — see
-[NOTICE](NOTICE)) and torch. On Blackwell cards install torch from the cu130 index first,
-since stock builds carry no `sm_120` kernels:
-
-```bash
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
-pip install -r requirements-reframe.txt
-```
-
-The cu130 index matters on Blackwell cards (RTX 50-series) — stock builds have no
-`sm_120` kernels. On Ampere/Ada, any recent build works.
-
-`ffmpeg` and `ffprobe` must also be on PATH, and **the ffmpeg build must include the
-vidstab filters** — the stabilise step uses `vidstabdetect` and `vidstabtransform`, which
-require `--enable-libvidstab`. Not every distribution build has them. Check with:
-
-```bash
-ffmpeg -filters | grep vidstab      # expect vidstabdetect and vidstabtransform
-```
-
-SeedVR2 is a separate project and is not installed by the above. Clone it beside this
-repository:
-
-```bash
-cd ..
-git clone https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler.git SeedVR2
-cd SeedVR2
-
-# Its requirements.txt lists bare "torch" and "torchvision", which would replace the
-# CUDA-matched build installed above with a generic one. Strip them out.
-grep -vE '^(torch|torchvision)([=<>].*)?$' requirements.txt > /tmp/req_noTorch.txt
-pip install -r /tmp/req_noTorch.txt
-```
-
-Model weights download automatically from HuggingFace on first run — nothing to fetch by
-hand. They come from [numz/SeedVR2_comfyUI](https://huggingface.co/numz/SeedVR2_comfyUI).
-
-## Usage
-
-**Prepare the source** — stabilise, then crop out whatever clutters the frame:
-
-```bash
-ffmpeg -i in.mp4 -vf vidstabdetect=shakiness=8:accuracy=15:result=t.trf -f null -
-ffmpeg -i in.mp4 \
-  -vf "vidstabtransform=input=t.trf:smoothing=20:maxangle=0:optzoom=0:zoom=0:crop=black" \
-  -c:v libx264 -preset slow -crf 10 -an stabilised.mp4
-ffmpeg -i stabilised.mp4 -vf "crop=312:176:0:0" -crf 0 cropped.mp4
-```
-
-`smoothing=20` and the crop geometry are tuned for the N90 clip, which is near-static
-handheld. **Match the smoothing window to the camera's motion before reusing these.** A
-second source that pans 1365px across a 320px frame needed `smoothing=10` instead: measured
-directly, `smoothing=20` already costs 24px of border intrusion for no shake reduction over
-10, and 30 pulled black borders 61px into the picture while removing no more shake either.
-Both the border intrusion and the residual shake are measurable on a ten-second segment
-before you rent anything — see [docs/findings.md](docs/findings.md).
-
-**Upscale** with SeedVR2 (locally, or on a rented GPU — see `cloud/`). `inference_cli.py`
-lives in the SeedVR2 checkout, so run it from there:
-
-```bash
-cd ../SeedVR2
-python inference_cli.py ../hoon-upscaler/cropped.mp4 \
-  --output ../hoon-upscaler/raw_upscaled.mp4 \
-  --dit_model seedvr2_ema_3b_fp16.safetensors \
-  --resolution 1080 --batch_size 33 --temporal_overlap 5 \
-  --chunk_size 370 --color_correction wavelet --video_backend ffmpeg
-```
-
-**Finish** — timing, grade and interpolation in one step:
+Then, with a stabilised and cropped source that SeedVR2 has upscaled:
 
 ```bash
 bash pipeline/finish.sh raw_upscaled.mp4 MyClip in.mp4
 ```
 
-Produces `MyClip_lumafix_14fps.mp4`, `_14fps_ungraded.mp4` and `_lumafix_K5.mp4` (60fps).
+That produces the source-cadence render, an ungraded reference, and the 60fps version.
 
-The grade is chosen from the clip rather than fixed, because a fixed one is only right for
-footage that happens to sit where it was tuned. `eq=contrast` expands around a pivot of 128:
-the same grade that suited a night clip averaging 140 clipped **51.8%** of a daylight clip
-averaging 208 to flat white. `finish.sh` measures the render, picks a preset, and then
-checks that grading did not add clipping — including when you override it:
+No GPU? The upscale runs on a rented one for about **$0.34 for the whole clip** —
+[docs/cloud-gpu.md](docs/cloud-gpu.md).
 
-```bash
-GRADE="curves=all='0/0 0.5/0.49 1/0.99'" bash pipeline/finish.sh ...
-```
+## Documentation
 
-## Scripts
-
-| File | Purpose |
+| | |
 |---|---|
-| `pipeline/finish.sh` | Luma fix → source cadence → grade → selective 60fps |
-| `pipeline/luma_stabilise.py` | Removes auto-exposure hunting (global level correction) |
-| `pipeline/selective_interp.py` | Interpolates normal gaps, holds through camera stalls |
-| `pipeline/reframe_src.py` | Solves a deadzone virtual camera from YOLO detections |
-| `pipeline/detect_car.py` | Per-frame subject detection (for tracked reframing) |
-| `cloud/launch_pod.sh` | Rents a GPU, runs `run_on_pod.sh` on it, downloads the result, terminates it |
-| `cloud/run_on_pod.sh` | Runs *on* the rented pod: installs, infers, verifies |
-| `tests/launch_pod.sh` | Exercises the pod launcher against stubs, no GPU needed |
-| `tests/cloud_pod.sh` | Exercises the on-pod runner against stubs, no GPU needed |
-| `tools/stall_discontinuity.py` | Scores how abrupt each stall exit is, against the clip's own motion |
-
-`reframe_src.py` and `detect_car.py` are an **experimental tracked-reframing path, not part
-of the pipeline above**
-and not runnable as shipped. Both operate in "STABFIRST" space — a 1408×1152 intermediate
-(4× the source, then a centred 1.12× crop) that no step in this repository produces. The
-constants in `reframe_src.py` are hardcoded to that geometry, and `detect_car.py` now
-records the space it detected in so a mismatch fails loudly rather than silently solving
-in the wrong coordinates. Producing the STABFIRST intermediate is left undocumented.
-
-## Renting a GPU
-
-16GB is not enough, in two different ways depending on the card. The local RTX 5060 Ti
-completes above ~1021×576 but throughput drops roughly 19× as model blocks swap to system
-RAM. A cloud RTX A4000, tested 2026-09-04, does not degrade — it fails: 720 dies with
-`torch.OutOfMemoryError` inside the VAE, producing nothing, while 540 runs fine. Do not
-plan around the graceful case; if you rent 16GB, expect the crash. An **A40 48GB** removes
-both, and makes 1080p possible at all.
-
-Measured on 2026-09-04, end to end via `cloud/run_on_pod.sh`:
-
-| | frames | wall clock | throughput |
-|---|---|---|---|
-| 15s test at 720 | 214 | 5m24s | 0.68 fps |
-| full clip at 720 | 1480 | 25m11s | 0.98 fps |
-
-**$0.34 total** at $0.49/hr, including pod setup, the SeedVR2 checkout and the first-run
-model download. The test render is worth doing first regardless — it costs about $0.15 and
-catches a broken setup in five minutes rather than forty.
-
-Pick **Ampere or Ada** (A40, A100, L40S), not Blackwell — see `CLAUDE.md`.
-
-All three VRAM branches were measured on hardware; `docs/findings.md` has the table. The
-short version: a 24GB card matches a 48GB card for speed at this clip size, and the 16GB
-A4000 runs out of memory at 720 but is fine at 540.
-
-The runner needs two inputs beside it, neither of which is in the repo since both are
-media. Build them from the stabilised source:
-
-```bash
-ffmpeg -i stabilised.mp4 -vf "crop=312:176:0:0" -crf 0 input/full_169.mp4
-ffmpeg -i input/full_169.mp4 -frames:v 214 -c copy     cloud/test_15s.mp4
-```
-
-`cloud/launch_pod.sh` is the entry point — it rents the pod, uploads the input and
-`run_on_pod.sh`, runs it remotely, downloads and verifies the result, and terminates the
-pod whether the render succeeded or the script crashed first. Run the 15-second one
-first — `bash cloud/launch_pod.sh 720 test`. It costs about $0.15 and catches a broken
-setup in five minutes instead of forty. `bash cloud/launch_pod.sh 1080 full` runs the
-whole clip once the test looks right.
-
-`bash tests/launch_pod.sh` exercises the launcher against stubs before you rent anything
-— pod creation, SSH, and the pod's own `run_on_pod.sh` are all faked, so a script with
-several real polling loops runs in under a second. `bash tests/cloud_pod.sh` does the
-same for the on-pod runner. Neither can tell you anything about the pod image itself.
-
-See `cloud/launch_pod.sh`, `cloud/run_on_pod.sh` and `docs/findings.md`.
+| [docs/setup.md](docs/setup.md) | Install: Python, ffmpeg/vidstab, SeedVR2, torch and the Blackwell trap |
+| [docs/pipeline.md](docs/pipeline.md) | All eight steps, why they are in that order, and the script reference |
+| [docs/cloud-gpu.md](docs/cloud-gpu.md) | Renting a GPU: which card, what it costs, what goes wrong |
+| [docs/findings.md](docs/findings.md) | The full engineering log — what was tried, and what was ruled out |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Licence terms, branching, and the standard for adding findings |
 
 ## A note on what this produces
 
 The source captured 352×288. Everything above that is **reconstructed, not recovered** —
-the model infers plausible detail rather than revealing hidden detail. It is consistent
-and convincing, but it is not evidence. During development the model rendered a phone
-number on a sign cleanly and incorrectly. Good for watching; not for reading.
+the model infers plausible detail rather than revealing hidden detail. It is consistent and
+convincing, but it is not evidence.
+
+During development the model rendered a phone number on a sign cleanly and confidently as
+`09 9270 5500`. The sign reads `08 9370 5600`.
+
+Good for watching. Not for reading, and not a faithful record of what the camera captured.
+If you share a render, say that it is AI-reconstructed.
 
 ## Licence
 
 Apache-2.0 — see [LICENSE](LICENSE).
 
-One caveat worth reading before reuse: `pipeline/detect_car.py` imports `ultralytics`,
-which is AGPL-3.0, so the permissive licence here does not extend to that file's
-dependency chain. [NOTICE](NOTICE) has the detail. No code licence covers the footage.
-
-Contribution terms and the standard for adding to `docs/findings.md` are in
-[CONTRIBUTING.md](CONTRIBUTING.md).
+One caveat before reuse: `pipeline/detect_car.py` imports `ultralytics`, which is
+AGPL-3.0, so the permissive licence here does not extend to that file's dependency chain.
+[NOTICE](NOTICE) has the detail. No code licence covers the footage.

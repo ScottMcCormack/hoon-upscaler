@@ -46,7 +46,7 @@ one without listing it here fails the suite.
 - [My own audio fix cost the pipeline a redundant remux, and could delete a finished render, 2026-09-12](#my-own-audio-fix-cost-the-pipeline-a-redundant-remux-and-could-delete-a-finished-render-2026-09-12)
 - [The stride grid's blind spot was never only at the tail, 2026-09-12](#the-stride-grids-blind-spot-was-never-only-at-the-tail-2026-09-12)
 - [A flag fixed to one argv position broke the shorter form its own usage line advertised, 2026-09-12](#a-flag-fixed-to-one-argv-position-broke-the-shorter-form-its-own-usage-line-advertised-2026-09-12)
-- [nan and inf pass "<= 0", and a three-file guard only ever had two files tested, 2026-09-12](#nan-and-inf-pass-0-and-a-three-file-guard-only-ever-had-two-files-tested-2026-09-12)
+- [nan and inf pass "<= 0", and a three-file guard only ever had two files tested, 2026-09-12](#nan-and-inf-pass--0-and-a-three-file-guard-only-ever-had-two-files-tested-2026-09-12)
 - [RIFE blends across hard scene cuts, and this repo cannot verify a fix, 2026-09-12](#rife-blends-across-hard-scene-cuts-and-this-repo-cannot-verify-a-fix-2026-09-12)
 - [A merged stderr stream could silently corrupt the auto-selected interpolator, 2026-09-12](#a-merged-stderr-stream-could-silently-corrupt-the-auto-selected-interpolator-2026-09-12)
 - [A run that failed after grading could leave a fresh 14fps pair beside a stale K5, 2026-09-12](#a-run-that-failed-after-grading-could-leave-a-fresh-14fps-pair-beside-a-stale-k5-2026-09-12)
@@ -86,6 +86,7 @@ one without listing it here fails the suite.
 - [An independent review caught two more, one of them in my own fixes above, 2026-09-12](#an-independent-review-caught-two-more-one-of-them-in-my-own-fixes-above-2026-09-12)
 - [Two more real gaps, and two gaps in the tests that should have covered them, 2026-09-12](#two-more-real-gaps-and-two-gaps-in-the-tests-that-should-have-covered-them-2026-09-12)
 - [A fourth review round: one declined, four fixed, 2026-09-12](#a-fourth-review-round-one-declined-four-fixed-2026-09-12)
+- [The README-restructure PR rebased across the launcher, and review found the doc split itself needed checking, 2026-09-12](#the-readme-restructure-pr-rebased-across-the-launcher-and-review-found-the-doc-split-itself-needed-checking-2026-09-12)
 
 ## Pre-filters — roughly twenty variants, all unnecessary in the end
 
@@ -2547,3 +2548,75 @@ real pod," which is the claim that still holds.
 
 Full suite: 195 passed (43 in the `launch` group, up from 39 - four new cases for the
 widened preflight check).
+
+## The README-restructure PR rebased across the launcher, and review found the doc split itself needed checking, 2026-09-12
+
+Splitting `README.md`'s detail into `docs/setup.md`, `docs/pipeline.md` and
+`docs/cloud-gpu.md` had been open long enough that `launch_pod.sh` (above) landed on `main`
+first. Rebasing surfaced the obvious conflicts - both PRs touched the README - but also
+something less obvious: some of what the new `docs/cloud-gpu.md` said about running a pod
+was now describing a workflow that no longer exists, because it was written against the
+manual `run_on_pod.sh` upload dance the launcher replaced. A doc split is not immune to the
+same staleness that hits any doc; it just changes which file goes stale.
+
+**The doc-link test only checked that a file existed, not that a `#fragment` did.** The
+`repository: every relative doc link resolves` check strips everything after `#` before
+checking the target exists - so `docs/setup.md` linking to
+`pipeline.md#the-experimental-reframing-path` only proves `pipeline.md` is there, not that
+the heading is. It also skipped every same-document `#foo` link outright, on the theory
+that anything starting with `#` was "already handled" - it was not handled at all. Fixed
+by slugifying every heading in a target document with GitHub's own algorithm (lowercase,
+strip everything but word characters/spaces/existing hyphens, then turn each remaining
+whitespace character into its own hyphen - critically, *not* collapsing runs of them, since
+punctuation removed from between two spaces leaves the gap as a double hyphen in the real
+slug) and checking the fragment against that set, for both cross-file and same-document
+links. Verified by reproduction, not just written and trusted: with the old check, a
+deliberately renamed fragment still passed; with the new one it fails, confirming the old
+assertion truly was vacuous for this case, and the new one catches it.
+
+**That fix immediately found a real broken anchor already in the file testing it.**
+`docs/findings.md`'s own Contents index links to
+`#nan-and-inf-pass-0-and-a-three-file-guard-only-ever-had-two-files-tested-2026-09-12` for
+a heading whose actual text contains `"<= 0"` - the quote marks sit either side of a space
+that survives slugification as its own hyphen, and the real anchor is
+`...pass--0-and...` (double hyphen), not `...pass-0-and...` (single). This entry's own link
+had been wrong since it was written and nothing had ever clicked it to notice. Fixed the
+index entry; mutation-tested by reverting it back to the single-hyphen form and confirming
+the new check fails on exactly this line, then restoring it.
+
+**`docs/cloud-gpu.md` still told readers to run `run_on_pod.sh` by hand.** The "Running it"
+section predated `launch_pod.sh`'s merge and documented uploading two files and invoking
+the on-pod runner directly - the workflow the launcher exists specifically to replace, and
+a live instance of the same class of finding a suppressed review comment had already caught
+here (`cd cloud` was never mentioned before the direct `run_on_pod.sh` invocation).
+Rewritten to describe `launch_pod.sh` as the entry point, matching the equivalent section
+already fixed in `README.md` when the launcher merged.
+
+**The same section also overclaimed what the A40 buys.** "Makes 1080p possible at all"
+contradicts this file's own measured RTX 5060 Ti behavior a few lines above it: the local
+card completes above the VRAM cliff, just roughly 19x slower - the A40 makes 1080p
+*practical*, not the only way to reach it. Reworded.
+
+**`docs/pipeline.md` miscounted its own step split.** "The last five are automated by
+`pipeline/finish.sh`" - but `finish.sh` only covers steps 5-8 (four steps); step 4, the
+upscale, is a separate manual (or cloud) command by design, exactly as the section below it
+already shows. Fixed the count, and updated the Scripts table's `cloud/run_on_pod.sh` row
+(unchanged since before the launcher existed) to list `launch_pod.sh` and both test files.
+
+**`docs/setup.md` claimed its own test suite validated more than it does.** "A genuine
+check that steps 1-4 above are installed correctly" - read against the actual preflight in
+`tests/run.sh`, which checks `ffmpeg`/`ffprobe`/`python`/`timeout` are on PATH and that
+`numpy`/`cv2` import, nothing more. It never checks for the vidstab filters step 2 actually
+needs (a separate, existing check earlier in the same doc does that), and SeedVR2/torch
+(steps 3-4) are stubbed throughout the suite, not exercised. Reworded to claim only what
+step 1 and the pipeline's own logic - the part the suite genuinely exercises.
+
+**The interpolator-selection and stabiliser-smoothing notes had nowhere to land.** Both
+were written into `README.md` after this branch split off, so rebasing lost them from the
+README's simplified structure without anywhere else to catch them. Migrated into
+`docs/pipeline.md`: the RIFE/`minterpolate` selection logic as a new "Overriding the
+interpolator" subsection (paralleling the existing "Overriding the grade" one), and the
+`smoothing=20`-vs-`smoothing=10` tuning note into "Prepare the source", next to the crop
+command it sits beside in every other version of this text.
+
+Full suite: 196 passed.

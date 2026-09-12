@@ -47,6 +47,7 @@ one without listing it here fails the suite.
 - [The stride grid's blind spot was never only at the tail, 2026-09-12](#the-stride-grids-blind-spot-was-never-only-at-the-tail-2026-09-12)
 - [A flag fixed to one argv position broke the shorter form its own usage line advertised, 2026-09-12](#a-flag-fixed-to-one-argv-position-broke-the-shorter-form-its-own-usage-line-advertised-2026-09-12)
 - [nan and inf pass "<= 0", and a three-file guard only ever had two files tested, 2026-09-12](#nan-and-inf-pass-0-and-a-three-file-guard-only-ever-had-two-files-tested-2026-09-12)
+- [RIFE blends across hard scene cuts, and this repo cannot verify a fix, 2026-09-12](#rife-blends-across-hard-scene-cuts-and-this-repo-cannot-verify-a-fix-2026-09-12)
 
 **Grading**
 
@@ -1863,3 +1864,43 @@ three files.** Existing tests covered a missing `IFNet_HDv3.py` and a missing
 themselves) - dropping it from the checked tuple in production would have left the whole
 suite green. Added the symmetric case. Mutation-tested: removing `flownet.pkl` from the
 guard's own tuple fails exactly this new test.
+
+## RIFE blends across hard scene cuts, and this repo cannot verify a fix, 2026-09-12
+
+**Confirmed: `interpolate()`'s frame-consumption loop has no scene-cut guard.** Practical-
+RIFE's own `inference_video.py` computes SSIM between adjacent frames, and below 0.2
+repeats the previous frame instead of running the model - treating a hard cut as a hold,
+not a transition. This repo's `interpolate()` calls `model.inference(t_prev, t_cur, frac,
+scale)` (around line 496) on every adjacent pair unconditionally; there is no SSIM check,
+or any equivalent, anywhere in `rife.py`. Read the full frame-consumption loop directly to
+confirm this rather than trusting the review's description of it - it is accurate. A
+direct caller feeding this CLI a multi-shot clip would get synthetic cross-fade frames
+generated across each cut.
+
+**Declined: porting the SSIM-threshold guard.** Two things distinguish this from the fixes
+elsewhere in this round, both closer in shape to the VFR-detection and CUDA-weights-
+smoke-load gaps already declined earlier in this same PR than to any of the defects fixed:
+
+- **`finish.sh` never exercises this path.** Every stage upstream of `interpolate()`
+  (stabilise, crop, upscale-restore, cadence-restore, grade) operates on one continuous
+  camera take; both calibration clips (the N90 burnout, MVI_0081) are themselves single
+  shots. There is no cut in anything this pipeline actually produces for `interpolate()`
+  to see, by construction, not by luck - this is a capability gap for footage this tool
+  does not process, not a defect in footage it does.
+- **The threshold is not verifiable here.** `ssim < 0.2` is calibrated against Practical-
+  RIFE's own SSIM implementation, colour handling, and test footage, none of which this
+  repo can inspect or reproduce. A synthetic test proving two very different images score
+  low would not validate that specific number against a real cut, and this repository has
+  no footage containing one to calibrate against - the same shape of problem as the VFR
+  detector declined two entries above, for the same reason.
+
+A third reason this is a poor candidate for a hand-verified partial fix, unlike the SSIM-
+adjacent windowing fix earlier in this PR: the decision has to be made mid-stream, inside
+the streaming `read()`/`ensure_cur()` loop, past the point `torch` is imported - holding a
+frame instead of inferring changes which source frames get consumed next, so it cannot be
+pulled into a pure, torch-free function the way `windowed_max_mean()` and
+`output_schedule()` were. There is no way to land this changed and still keep it inside
+what this suite can exercise without a CUDA torch and vendored weights.
+
+Documented the limitation in `rife.py`'s own usage text, next to the existing CFR
+requirement, rather than guessing at an unverifiable guard.

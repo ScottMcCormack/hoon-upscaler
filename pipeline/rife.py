@@ -72,6 +72,19 @@ Point RIFE_HOME elsewhere if you put it somewhere else.
                                                          cadence to CFR before this runs; a
                                                          direct caller with genuinely VFR
                                                          input will get flattened timing.
+                                                         <in> is also assumed to be a single
+                                                         continuous shot. Unlike Practical-
+                                                         RIFE's own inference_video.py, this
+                                                         does not detect hard scene cuts (it
+                                                         uses SSIM < 0.2 and holds the prior
+                                                         frame instead of blending) - every
+                                                         adjacent pair is interpolated, cut
+                                                         or not. finish.sh's inputs are each
+                                                         one continuous take by construction
+                                                         of every stage upstream, so this has
+                                                         never been exercised; a direct caller
+                                                         with multi-shot input will get
+                                                         synthetic cross-fades at cut points.
 """
 import math
 import os

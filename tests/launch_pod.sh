@@ -46,6 +46,8 @@ EOF
 
 cat > "$STUB/runpodctl" <<'EOF'
 #!/bin/bash
+mkdir -p "$STUB_STATE_DIR"
+echo "$*" >> "$STUB_STATE_DIR/runpodctl_calls.log"
 case "$1 $2" in
   "pod list")
     # STUB_POD_LIST_FAIL only affects the `-o json` form cleanup() uses to confirm
@@ -69,6 +71,13 @@ case "$1 $2" in
       nested)   echo "{\"pod\":{\"id\":\"${STUB_POD_ID:-podabc123456}\"}}" ;;
       non_json) echo "Pod created successfully with id ${STUB_POD_ID:-podabc123456} in region US-CA" ;;
       unparseable) echo "no id-shaped token anywhere in this line at all" ;;
+      deeply_nested_with_decoy)
+        # "id" three levels deep, with an unrelated but same-shaped token (a decoy
+        # machineId) appearing EARLIER in the raw text - the shallow (top-level or
+        # one-level-nested) search finds neither and falls to the raw-text regex, which
+        # would grab the decoy first since it comes first in the string. Only a
+        # recursive JSON search finds the real id correctly regardless of depth or order.
+        echo "{\"data\":{\"machineId\":\"decoytoken12\",\"pod\":{\"details\":{\"id\":\"${STUB_POD_ID:-podabc123456}\"}}}}" ;;
     esac
     exit 0 ;;
   "pod get")
@@ -244,6 +253,23 @@ case "$out" in
          "$(printf '%s' "$out" | tail -1)" ;;
 esac
 
+# The id sits three levels deep, and an unrelated same-shaped token (a decoy machineId)
+# appears earlier in the raw text - a shallow (top-level or one-level-nested) JSON search
+# finds neither the real id nor a reason to keep looking, and falls to the raw-text regex,
+# which would grab the decoy first since it comes first in the string. Checked directly
+# against the runpodctl call log, not just "did the run finish" - a wrong id still lets
+# the by-name fallback in cleanup() find and terminate the real pod, so a merely-successful
+# run does not by itself prove the RIGHT id was used anywhere upstream of that fallback.
+run_launch env STUB_CREATE_SHAPE=deeply_nested_with_decoy PATH="$STUB:$PATH" bash "$LAUNCH" 720 test >/dev/null
+CALLS="$(cat "$STUB_STATE_DIR/runpodctl_calls.log" 2>/dev/null || true)"
+case "$CALLS" in
+  *"pod delete podabc123456"*) ok "creation response: the real id is found however deeply it is nested, not a same-shaped decoy" ;;
+  *"pod delete decoytoken12"*) bad "creation response: the real id is found however deeply it is nested, not a same-shaped decoy" \
+         "deleted the decoy token instead of the real pod id" ;;
+  *) bad "creation response: the real id is found however deeply it is nested, not a same-shaped decoy" \
+         "no delete call recorded: $CALLS" ;;
+esac
+
 # --- SSH-details response parsing: both shapes the real API has used ----------------
 for shape in ssh_object runtime_ports; do
   out="$(run_launch env STUB_SSH_SHAPE="$shape" PATH="$STUB:$PATH" bash "$LAUNCH" 720 test)"
@@ -290,6 +316,17 @@ if grep -q "terminating pod" "$W/sigterm.log"; then
   ok "signal: SIGTERM mid-poll still terminates the pod"
 else
   bad "signal: SIGTERM mid-poll still terminates the pod" "$(tail -3 "$W/sigterm.log")"
+fi
+# cleanup() ends in `exit $rc`, and `exit` fires the EXIT trap even when called from
+# inside the handler a caught signal already invoked - so a single SIGTERM used to run
+# the whole function TWICE (once as the INT/TERM handler, again via its own exit),
+# doubling every delete/list/sleep in it. One signal must produce exactly one cleanup.
+TERM_COUNT="$(grep -c "terminating pod" "$W/sigterm.log")"
+if [ "$TERM_COUNT" -eq 1 ]; then
+  ok "signal: SIGTERM triggers cleanup exactly once, not twice"
+else
+  bad "signal: SIGTERM triggers cleanup exactly once, not twice" \
+      "\"terminating pod\" appeared $TERM_COUNT times"
 fi
 
 # --- cleanup vs. a failed pod-list call ---------------------------------------------

@@ -105,6 +105,16 @@ STATE="$REPO/cloud/.pod_id_${POD_NAME}"   # gitignored; survives a crash so an o
 # ---------------------------------------------------------------------------
 cleanup() {
   local rc=$? PLS
+  # Cleared immediately, before anything else: this function ends in `exit $rc`, and
+  # `exit` always fires the EXIT trap - including when it is called from INSIDE the
+  # handler a caught INT or TERM already invoked. Left armed, a single Ctrl-C ran this
+  # whole function TWICE: once as the INT handler, then again when its own `exit`
+  # re-triggered EXIT - doubling every pod-delete attempt, list-confirmation call and the
+  # 5-second sleep in the by-name-removal branch, right when an operator interrupting a
+  # run most needs one clear account of what happened to the pod, not two. Reproduced
+  # directly with an isolated trap+exit construct before fixing. `rc` is captured first,
+  # since `trap` itself is a command and would otherwise overwrite $? before this reads it.
+  trap - EXIT INT TERM
   echo
   if [ -n "$POD_ID" ]; then
     echo "=== terminating pod $POD_ID ==="
@@ -188,17 +198,44 @@ CREATE="$(runpodctl create pod \
 # death with a live pod behind it. This is the exact trap CLAUDE.md documents; writing it
 # again here is what the first run of this script found.
 # Parse JSON first, then fall back to any pod-id-shaped token, since `create pod` does not
-# always honour -o json.
+# always honour -o json. The JSON search is RECURSIVE - not just top-level or one level of
+# nesting - specifically so the raw-text regex fallback below is reached only when the
+# response genuinely is not JSON, not merely because the id sits two levels deep. That
+# regex has no way to tell the pod's own id apart from another field of the same shape
+# (a machineId, templateId, registryAuthId) if one happens to appear first in the raw
+# text; the by-name match in cleanup() still finds the real pod even if this ever grabs
+# the wrong token, so this does not risk unbounded billing, but a wrong POD_ID still wastes
+# up to ten minutes waiting on a pod that does not exist and contradicts this script's own
+# claim to terminate only the one it created - worth narrowing rather than leaving as the
+# first resort for any shape the earlier, shallower search did not happen to cover.
 POD_ID="$(printf '%s' "$CREATE" | python3 -c '
 import json,re,sys
 raw = sys.stdin.read()
-try:
-    d = json.loads(raw)
-    if isinstance(d, dict):
+
+def find_id(obj):
+    if isinstance(obj, dict):
         for k in ("id", "podId"):
-            if d.get(k): print(d[k]); raise SystemExit
-        for v in d.values():
-            if isinstance(v, dict) and v.get("id"): print(v["id"]); raise SystemExit
+            v = obj.get(k)
+            if v:
+                return v
+        for v in obj.values():
+            found = find_id(v)
+            if found:
+                return found
+    elif isinstance(obj, list):
+        for item in obj:
+            found = find_id(item)
+            if found:
+                return found
+    return None
+
+try:
+    found = find_id(json.loads(raw))
+    if found:
+        print(found)
+        raise SystemExit
+except SystemExit:
+    raise
 except Exception:
     pass
 m = re.search(r"\b([a-z0-9]{12,20})\b", raw)

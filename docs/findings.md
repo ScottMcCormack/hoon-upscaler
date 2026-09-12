@@ -83,6 +83,7 @@ one without listing it here fails the suite.
 - [The empty-argument guard reached two of three positionals, 2026-09-12](#the-empty-argument-guard-reached-two-of-three-positionals-2026-09-12)
 - [A third recurrence retired the hardcoded line number instead of re-verifying it again, 2026-09-12](#a-third-recurrence-retired-the-hardcoded-line-number-instead-of-re-verifying-it-again-2026-09-12)
 - [Six more findings, and the suite that would have caught them, 2026-09-12](#six-more-findings-and-the-suite-that-would-have-caught-them-2026-09-12)
+- [An independent review caught two more, one of them in my own fixes above, 2026-09-12](#an-independent-review-caught-two-more-one-of-them-in-my-own-fixes-above-2026-09-12)
 
 ## Pre-filters — roughly twenty variants, all unnecessary in the end
 
@@ -2347,3 +2348,58 @@ fatal, a persistent one leaving the pod running rather than torn down, a genuine
 render still being caught, and both download failure and hash-mismatch verification
 failure leaving the pod running for manual recovery rather than destroying the only
 complete copy of the render.
+
+## An independent review caught two more, one of them in my own fixes above, 2026-09-12
+
+A second, independent pass over the six fixes above - reviewing the file while it was
+still being edited, not the final commit - found two further defects, both confirmed by
+direct reproduction before fixing.
+
+**Two of the five `set -e` fixes above were themselves still broken at review time.**
+`check_alive; ALIVE_RC=$?` and `pod_still_listed; case $? in ...` - the very bare-statement
+pattern this same file's entry above says was caught and fixed while building the test
+harness - were flagged again by this second review, against a snapshot taken mid-edit
+before that fix landed. Checked directly against the current file rather than assumed
+stale: both call sites already use the `CMD && VAR=0 || VAR=$?` idiom, and the full test
+suite (32 `launch` cases) passes. Recorded here anyway, because it is worth being honest
+about: a review that finds a bug already caught by your own harness is not a wasted
+review, it is confirmation the harness works.
+
+**`cleanup()` ran twice on a single SIGINT or SIGTERM.** `trap cleanup EXIT INT TERM`
+combined with `cleanup()` ending in `exit $rc` means a caught signal runs `cleanup()` once
+as the INT/TERM handler, and that invocation's own `exit` then fires the EXIT trap a
+*second* time - `exit` always triggers the EXIT trap, including when called from inside
+the handler for a different one. Reproduced directly with an isolated `trap`+`exit`
+construct (a bare counter incremented inside `cleanup()`, printed to a shared variable):
+one `kill -INT` produced two `cleanup called` lines. In the real script this doubles every
+pod-delete attempt, list-confirmation call, and the 5-second sleep in the by-name-removal
+branch, at the exact moment an operator interrupting a run most needs one clear account of
+what happened, not two. Fixed by clearing all three traps as the very first thing inside
+`cleanup()` (`rc` is captured one line earlier, since `trap` is itself a command and would
+otherwise overwrite `$?` first) - once cleared, `cleanup()`'s own `exit` has nothing left
+to re-fire. Mutation-tested: reverting the `trap -` line reproduces exactly two
+`"terminating pod"` lines for one signal; a new test pins the count at exactly one.
+
+**The pod-id parser's raw-text regex fallback could grab the wrong token.** `create pod`
+does not always honour `-o json`, so a raw-text regex (`\b([a-z0-9]{12,20})\b`) exists as a
+last resort when the JSON search fails - but that search only ever checked the top level of
+the parsed JSON and one level of nesting beneath it, so a real response with the id three
+or more levels deep would fall through to the SAME regex a non-JSON response does, over the
+raw JSON text. That text can easily contain other fields of the identical shape - a
+`machineId`, `templateId`, `registryAuthId` - and the regex has no way to prefer the pod's
+own id over one of those if it happens to appear first. This does not risk unbounded
+billing (the by-name match in `cleanup()` still finds and terminates the real pod
+regardless of what `POD_ID` holds), but a wrong id contradicts this script's own claim to
+terminate only the pod it created, and would waste up to ten minutes in the SSH-wait loop
+querying a pod that does not exist. Fixed by making the JSON search recursive - walking the
+entire parsed structure for an `id`/`podId` key at any depth, in dicts and lists both -
+so the fragile raw-text regex is reached only when the response genuinely is not JSON, not
+merely because the id sits deeper than the search used to look. Mutation-tested with a
+constructed response carrying the real id three levels deep and a decoy same-shaped token
+earlier in the raw text: the old (shallow) search fell through to the regex and deleted the
+decoy; the fix finds the real id directly. Checked against the actual `runpodctl` call the
+script made, not just whether the run finished - a wrong id does not visibly break the
+happy path on its own, which is exactly why it needed a call-log assertion rather than an
+end-to-end one to pin.
+
+Two new tests (32 total in the `launch` group). Full suite: 184 passed.

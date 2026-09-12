@@ -84,6 +84,7 @@ one without listing it here fails the suite.
 - [A third recurrence retired the hardcoded line number instead of re-verifying it again, 2026-09-12](#a-third-recurrence-retired-the-hardcoded-line-number-instead-of-re-verifying-it-again-2026-09-12)
 - [Six more findings, and the suite that would have caught them, 2026-09-12](#six-more-findings-and-the-suite-that-would-have-caught-them-2026-09-12)
 - [An independent review caught two more, one of them in my own fixes above, 2026-09-12](#an-independent-review-caught-two-more-one-of-them-in-my-own-fixes-above-2026-09-12)
+- [Two more real gaps, and two gaps in the tests that should have covered them, 2026-09-12](#two-more-real-gaps-and-two-gaps-in-the-tests-that-should-have-covered-them-2026-09-12)
 
 ## Pre-filters — roughly twenty variants, all unnecessary in the end
 
@@ -2403,3 +2404,80 @@ happy path on its own, which is exactly why it needed a call-log assertion rathe
 end-to-end one to pin.
 
 Two new tests (32 total in the `launch` group). Full suite: 184 passed.
+
+## Two more real gaps, and two gaps in the tests that should have covered them, 2026-09-12
+
+The next Copilot review round on the launcher, after all of the above, found two further
+correctness defects and two coverage gaps in `tests/launch_pod.sh` itself.
+
+**`cleanup()` used directly as the INT/TERM handler could report success for a run a
+signal actually killed.** `local rc=$?` reads whatever exit status happened to precede the
+signal - which can easily be 0, since the signal arrives asynchronously, unrelated to
+whatever command last finished. Reproduced directly: `true` (rc 0) immediately before a
+`sleep` that gets SIGTERM'd, with `cleanup` bound straight to INT/TERM, reports the whole
+launcher's exit as 0 - a pod torn down mid-render by a signal reads as a successful run to
+anything checking `$?` (a supervising watchdog, a CI step). Fixed by binding INT/TERM to
+`exit 130`/`exit 143` (the conventional 128+signal statuses) instead of `cleanup` directly,
+and leaving `cleanup` bound only to EXIT - which those `exit` calls still trigger, now with
+the correct status for `cleanup`'s own `local rc=$?` to capture. This also means `cleanup`
+is no longer ever invoked directly as a signal handler at all, closing the double-fire risk
+by a second, independent route (the `trap - EXIT INT TERM` inside `cleanup` from the
+previous round stays anyway, as a second layer against any other path that might call it
+directly). New test asserts the launcher's own exit status is exactly 143 after a SIGTERM,
+not merely that cleanup ran - the previous round's test would not have caught this, since
+it only checked for "terminating pod" in the log, which still appeared either way.
+
+**Per-invocation download staging did not make the final publish atomic.** The previous
+round's fix (nonce-keyed staging names) stops two concurrent launches of the same
+resolution/mode from corrupting each other's downloads mid-verification - but `OUT_BASE`,
+the *published* name, is deliberately shared, not nonce-keyed, and the two `mv`s that
+publish a verified pair were never serialized against each other. Two concurrent launches'
+`mv` pairs could still interleave: A's manifest published, then B's manifest AND video
+published, then A's video overwriting B's - leaving a manifest paired with the wrong
+video. Unlike the `finish.sh` atomicity limitation declined earlier in this project (a
+narrow window against an external kill, no concurrent readers), this is two of this
+script's *own* invocations racing under perfectly ordinary use - a foreseeable scenario,
+not a crash - so it was fixed rather than declined: `flock` now serializes the two-mv
+publish, scoped to a lock file keyed by `OUT_BASE` (the one thing in this script
+deliberately shared across concurrent launches targeting the same output, rather than
+nonce-isolated like everything else). Verified with a genuinely concurrent test - two real
+backgrounded launcher invocations, one carrying a distinguishable second fixture set and
+undelayed, the other artificially widened (via a stub `mv` that sleeps after the manifest
+move) to give the other a real window - checked against the actual published files' content
+(the manifest's recorded sha256 against the actual mp4's sha256), not just that the run
+finished. Timing-dependent races are usually flaky to pin; making this one deterministic
+took care: the second launch is started the instant the first's manifest appears at the
+final destination (a poll, not a guessed delay), so it does not depend on absolute
+scheduling to land inside the artificially-widened window. Confirmed 5/5 across repeated
+runs both ways (interleaves without the lock, never does with it) before trusting the test.
+
+**The preflight guard tests never checked the invariant they claimed to.** Every guard
+above is supposed to refuse *before* `runpodctl create pod` is ever invoked - the entire
+reason these guards exist here rather than relying on `run_on_pod.sh`'s own copies, which
+only run after a pod is already billing. The tests asserted only the diagnostic message
+and exit status; none inspected the `runpodctl` call log, despite a comment claiming that
+check was already being made. A guard that printed the right refusal and created the pod
+anyway would have passed every one of them. Added a shared `assert_refused_before_billing`
+helper checking all three - nonzero exit, the expected message, and no `create pod` line in
+the log - and mutation-tested it directly: patched a copy of the guard to also fire
+`runpodctl create pod` after refusing, confirmed the new assertion catches it where the old
+one would not have.
+
+**The cleanup tests never exercised the by-name fallback or the "still billing" branch.**
+Three stub controls (`STUB_POD_LIST_CONTAINS`, `STUB_DELETE_FAIL`, `STUB_REMOVE_FAIL`)
+existed for exactly this and were never used in a dedicated test. Needed a stateful stub to
+test properly, not just a static one: "the pod is still listed" has to become "gone" once a
+removal actually succeeds, or the second confirmation check inside `cleanup()` never sees
+the outcome the test intends. Added a `pod_removed` marker file the stub sets on a
+successful delete/remove call and checks before answering a subsequent list query, and
+split what had been one shared "remove" control into separate ones for the id-based
+fallback and the by-name one, so a test can make one succeed while the other fails and
+actually exercise a single specific path rather than always exercising both or neither.
+Two new tests: an id-based delete failure correctly falls back to removal by the
+nonce-backed name and cleans up the recovery record; both removal paths failing correctly
+reports "STILL BILLING", preserves the recovery record, and the launcher's own exit status
+reflects the failure. Mutation-tested against the real dispatch logic (swapped the
+"still listed" and "confirmed absent" case labels in `cleanup()`) - 4 of the 5 new
+assertions across both tests caught it.
+
+Full suite: 191 passed (39 in the `launch` group, up from 32).

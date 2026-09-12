@@ -172,7 +172,21 @@ cleanup() {
   esac
   exit $rc
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+# NOT `trap cleanup INT TERM` - cleanup's `local rc=$?` would then capture whatever
+# command happened to finish executing immediately before an ASYNCHRONOUS signal
+# arrived, not the signal itself. Reproduced directly: `true` (rc 0) followed by a
+# `sleep` that gets SIGTERM'd, with cleanup bound directly to INT/TERM, reports the
+# whole launcher's exit status as 0 - a pod that was just torn down mid-render by a
+# signal reads as a successful run to anything checking $?. Exiting with the
+# conventional 128+signal status here instead gives the EXIT trap (still bound to
+# cleanup, unconditionally) the correct $? to capture, and - since cleanup is no longer
+# registered as the INT/TERM handler itself - there is no longer a second, separate
+# invocation of it to guard against for THIS reason either (the `trap - EXIT INT TERM`
+# at the top of cleanup stays anyway, as a second layer against any other path that
+# might call it directly).
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 say() { printf '\n=== %s ===\n' "$*"; }
 elapsed() { printf '%dm%02ds' $(( ($(date +%s) - T0) / 60 )) $(( ($(date +%s) - T0) % 60 )); }
@@ -463,11 +477,22 @@ then
   exit 1
 fi
 
-# Published only now, as the very last step - both files verified and named for this
-# invocation alone, so this mv can never race a concurrent launch's own mv of its own
-# differently-named staged pair.
-mv "$STAGE_JSON" "$DEST/${OUT_BASE}.json"
-mv "$STAGE_MP4" "$DEST/${OUT_BASE}.mp4"
+# Published only now, as the very last step - both files verified. The staging above
+# stops two concurrent launches of the same RES/MODE corrupting EACH OTHER's downloads,
+# but OUT_BASE (unlike everything else in this script) is deliberately NOT nonce-keyed -
+# it is the shared, stable output name - so both launches still publish to the same final
+# pair, and two separate `mv`s per launch can interleave at the destination: A's json
+# landing next to B's mp4, or the reverse, leaving a manifest paired with the wrong video.
+# `flock` serializes the two-mv publish itself, scoped to a lock file keyed by OUT_BASE
+# (the one thing here that is deliberately SHARED across concurrent launches targeting
+# the same name) - whichever launch gets the lock publishes its own verified pair
+# completely before the other can start.
+PUBLISH_LOCK="$DEST/.publish_lock_${OUT_BASE}"
+(
+  flock -x 200
+  mv "$STAGE_JSON" "$DEST/${OUT_BASE}.json"
+  mv "$STAGE_MP4" "$DEST/${OUT_BASE}.mp4"
+) 200>"$PUBLISH_LOCK"
 
 say "done in $(elapsed): $DEST/${OUT_BASE}.mp4"
 # EXIT trap terminates the pod from here.

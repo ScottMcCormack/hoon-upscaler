@@ -38,10 +38,37 @@ export STUB_FIXTURE_MP4="$FIX/out.mp4"
 echo "corrupted bytes" > "$FIX/bad.mp4"
 export STUB_FIXTURE_BAD_MP4="$FIX/bad.mp4"
 
+# A distinct, internally-consistent second render (different bytes, different sha256), so
+# a concurrent-publish test can tell whether the final pair is A's manifest with A's own
+# video or B's with B's - or, if publication interleaved, a manifest from one paired with
+# the video from the other.
+echo "a completely different fake render, set B" > "$FIX/outB.mp4"
+FIXSHA_B="$(sha256sum "$FIX/outB.mp4" | cut -d' ' -f1)"
+cat > "$FIX/outB.json" <<JSON
+{"output": {"sha256": "$FIXSHA_B", "frames": 214, "width": 1280, "height": 720}}
+JSON
+export STUB_FIXTURE_MANIFEST_B="$FIX/outB.json"
+export STUB_FIXTURE_MP4_B="$FIX/outB.mp4"
+
 # --- stubs -------------------------------------------------------------------
 cat > "$STUB/sleep" <<'EOF'
 #!/bin/bash
 exit 0
+EOF
+
+# Widens the publish critical section on demand (STUB_PUBLISH_DELAY), so a concurrent
+# racing launch has a real window to interleave its own moves into the gap if - and only
+# if - the two moves are not actually serialized by a lock around them. Real `mv`
+# otherwise; only ever used at the two publish call sites in launch_pod.sh, so this
+# cannot affect anything else the script does.
+REALMV="$(command -v mv)"
+REALSLEEP="$(command -v sleep)"
+cat > "$STUB/mv" <<EOF
+#!/bin/bash
+"$REALMV" "\$1" "\$2"
+if [ -n "\${STUB_PUBLISH_DELAY:-}" ] && [[ "\$2" == *.json ]]; then
+  "$REALSLEEP" "\$STUB_PUBLISH_DELAY"
+fi
 EOF
 
 cat > "$STUB/runpodctl" <<'EOF'
@@ -58,7 +85,14 @@ case "$1 $2" in
         echo "error: could not reach RunPod API" >&2
         exit 1
       fi
-      if [ -n "${STUB_POD_LIST_CONTAINS:-}" ]; then
+      # "self" stands in for whatever --name this run's own `create pod` call actually
+      # used - the real POD_NAME is a nonce (hoon-<out_base>-$$-<timestamp>), unknown to
+      # the test in advance, so it is captured off the real create-pod invocation below
+      # rather than guessed at here.
+      if [ "${STUB_POD_LIST_CONTAINS:-}" = "self" ] && [ ! -f "$STUB_STATE_DIR/pod_removed" ]; then
+        NAME="$(cat "$STUB_STATE_DIR/last_pod_name" 2>/dev/null || true)"
+        [ -n "$NAME" ] && echo "[{\"id\":\"${STUB_POD_ID:-podabc123456}\",\"name\":\"$NAME\"}]" || echo "[]"
+      elif [ -n "${STUB_POD_LIST_CONTAINS:-}" ] && [ ! -f "$STUB_STATE_DIR/pod_removed" ]; then
         echo "[{\"id\":\"${STUB_POD_ID:-podabc123456}\",\"name\":\"${STUB_POD_LIST_CONTAINS}\"}]"
       else
         echo "[]"
@@ -66,6 +100,8 @@ case "$1 $2" in
     fi
     exit 0 ;;
   "create pod")
+    prev=""
+    for a in "$@"; do [ "$prev" = "--name" ] && printf '%s' "$a" > "$STUB_STATE_DIR/last_pod_name"; prev="$a"; done
     case "${STUB_CREATE_SHAPE:-dict_id}" in
       dict_id)  echo "{\"id\":\"${STUB_POD_ID:-podabc123456}\"}" ;;
       nested)   echo "{\"pod\":{\"id\":\"${STUB_POD_ID:-podabc123456}\"}}" ;;
@@ -88,10 +124,18 @@ case "$1 $2" in
     esac
     exit 0 ;;
   "pod delete")
+    [ "${STUB_DELETE_FAIL:-0}" = "0" ] && touch "$STUB_STATE_DIR/pod_removed"
     exit "${STUB_DELETE_FAIL:-0}" ;;
   "remove pod")
-    exit "${STUB_REMOVE_FAIL:-0}" ;;
+    # The id-based fallback (tried when `pod delete` fails), independent of
+    # STUB_REMOVE_FAIL below - which controls the BY-NAME fallback instead, so a test can
+    # make one succeed while the other fails and actually exercise a specific path.
+    [ "${STUB_REMOVE_ID_FAIL:-0}" = "0" ] && touch "$STUB_STATE_DIR/pod_removed"
+    exit "${STUB_REMOVE_ID_FAIL:-0}" ;;
   "remove pods")
+    # A real removal takes a moment to be reflected; the script sleeps 5s and re-lists
+    # itself, so the stub does not need to fake that delay - only the eventual outcome.
+    [ "${STUB_REMOVE_FAIL:-0}" = "0" ] && touch "$STUB_STATE_DIR/pod_removed"
     exit "${STUB_REMOVE_FAIL:-0}" ;;
   *) exit 0 ;;
 esac
@@ -156,9 +200,12 @@ else
   [ "${STUB_SCP_DOWNLOAD_ALWAYS_FAIL:-0}" = "1" ] && exit 1
   [ "$c" -lt "${STUB_SCP_DOWNLOAD_FAILS:-0}" ] && exit 1
   case "$src" in
-    *.json) cp "$STUB_FIXTURE_MANIFEST" "$dest" ;;
+    *.json)
+      if [ "${STUB_FIXTURE_SET:-A}" = "B" ]; then cp "$STUB_FIXTURE_MANIFEST_B" "$dest"
+      else cp "$STUB_FIXTURE_MANIFEST" "$dest"; fi ;;
     *.mp4)
       if [ "${STUB_DOWNLOAD_BAD_MP4:-0}" = "1" ]; then cp "$STUB_FIXTURE_BAD_MP4" "$dest"
+      elif [ "${STUB_FIXTURE_SET:-A}" = "B" ]; then cp "$STUB_FIXTURE_MP4_B" "$dest"
       else cp "$STUB_FIXTURE_MP4" "$dest"; fi ;;
   esac
   exit 0
@@ -183,44 +230,63 @@ run_launch() {  # env... -- args to launch_pod.sh
   env PATH="$STUB:$PATH" "$@" 2>&1
 }
 
+# Every preflight guard below claims to refuse BEFORE `runpodctl create pod` is ever
+# invoked - the whole reason these guards exist here rather than relying on run_on_pod.sh's
+# own copies, which only run after a pod is already billing. That invariant was never
+# actually checked: the guards below asserted only the diagnostic message and/or exit
+# status, so a regression that printed the right refusal AND created the pod anyway would
+# still have passed every one of them. This helper checks all three: nonzero exit, the
+# expected message, and no "create pod" line in the same run's runpodctl call log.
+assert_refused_before_billing() {  # name pattern env... -- args
+  local name="$1" pat="$2"; shift 2
+  clean
+  local out status calls
+  out="$(env PATH="$STUB:$PATH" "$@" 2>&1)"; status=$?
+  calls="$(cat "$STUB_STATE_DIR/runpodctl_calls.log" 2>/dev/null || true)"
+  if [ "$status" -eq 0 ]; then
+    bad "$name" "exited 0 - it printed a message but did not refuse"
+  elif [[ "$calls" == *"create pod"* ]]; then
+    bad "$name" "a pod was created despite the refusal: $calls"
+  else
+    case "$out" in
+      *"$pat"*) ok "$name" ;;
+      *) bad "$name" "exit $status, but no '$pat' in: $(printf '%s' "$out" | tail -1)" ;;
+    esac
+  fi
+}
+
 # --- preflight guards, refused before anything billable happens --------------------
 # These mirror run_on_pod.sh's own empty-argument standard, applied here too since this
 # wrapper spends money before run_on_pod.sh's guards ever run on the pod.
-assert_stderr_matches "guard: an explicitly empty resolution is refused" \
+assert_refused_before_billing "guard: an explicitly empty resolution is refused" \
   "resolution was given but empty" \
-  env PATH="$STUB:$PATH" bash "$LAUNCH" ""
+  bash "$LAUNCH" ""
 
-assert_stderr_matches "guard: an explicitly empty mode is refused" \
+assert_refused_before_billing "guard: an explicitly empty mode is refused" \
   "mode was given but empty" \
-  env PATH="$STUB:$PATH" bash "$LAUNCH" 720 ""
+  bash "$LAUNCH" 720 ""
 
-assert_stderr_matches "guard: extra arguments are refused" \
+assert_refused_before_billing "guard: extra arguments are refused" \
   "unexpected extra argument" \
-  env PATH="$STUB:$PATH" bash "$LAUNCH" 720 test extra
+  bash "$LAUNCH" 720 test extra
 
-assert_stderr_matches "guard: a non-integer resolution is refused" \
+assert_refused_before_billing "guard: a non-integer resolution is refused" \
   "resolution must be a positive integer" \
-  env PATH="$STUB:$PATH" bash "$LAUNCH" abc test
+  bash "$LAUNCH" abc test
 
-assert_stderr_matches "guard: an unknown mode is refused" \
+assert_refused_before_billing "guard: an unknown mode is refused" \
   "unknown mode" \
-  env PATH="$STUB:$PATH" bash "$LAUNCH" 720 tset
+  bash "$LAUNCH" 720 tset
 
 # MAX_MIN: reviewed as unvalidated, unlike RES - a non-integer or non-positive value used
 # to reach the polling loop's `[ N -lt "$MAX_MIN" ]` unchecked, which silently skips the
 # loop entirely (bash's `[` errors "integer expected" and returns false) rather than
 # raising - so the ceiling-exceeded path ran immediately, after a real pod had already
-# been created. Refused here, before `runpodctl create pod` is ever invoked - checked by
-# asserting the create-pod marker file (STUB_POD_LIST_CONTAINS unused, so use the state
-# dir's absence of any pod-id file as the "nothing was created" signal).
+# been created.
 for bad in abc 0 -5; do
-  out="$(run_launch env MAX_MIN="$bad" PATH="$STUB:$PATH" bash "$LAUNCH" 720 test)"
-  case "$out" in
-    *"MAX_MIN must be a positive integer"*)
-      ok "guard: MAX_MIN='$bad' is refused before pod creation" ;;
-    *) bad "guard: MAX_MIN='$bad' is refused before pod creation" \
-           "$(printf '%s' "$out" | tail -1)" ;;
-  esac
+  assert_refused_before_billing "guard: MAX_MIN='$bad' is refused before pod creation" \
+    "MAX_MIN must be a positive integer" \
+    env MAX_MIN="$bad" bash "$LAUNCH" 720 test
 done
 
 # BATCH_SIZE/TEMPORAL_OVERLAP: spliced unquoted into a remote shell command string later
@@ -228,11 +294,9 @@ done
 # Refused here too, before pod creation, with the same guard run_on_pod.sh applies on the
 # pod itself.
 for v in BATCH_SIZE TEMPORAL_OVERLAP; do
-  out="$(env "$v=17 --debug_leak" PATH="$STUB:$PATH" bash "$LAUNCH" 720 test 2>&1; clean)"
-  case "$out" in
-    *"$v must be a positive integer"*) ok "guard: $v with an embedded flag is refused" ;;
-    *) bad "guard: $v with an embedded flag is refused" "$(printf '%s' "$out" | tail -1)" ;;
-  esac
+  assert_refused_before_billing "guard: $v with an embedded flag is refused" \
+    "$v must be a positive integer" \
+    env "$v=17 --debug_leak" bash "$LAUNCH" 720 test
 done
 
 # --- pod-creation response parsing: every shape the real API has returned -----------
@@ -300,6 +364,44 @@ else
   ok "happy path: the state file is removed once termination is confirmed"
 fi
 
+# --- concurrent publish must not interleave -----------------------------------------
+# Per-invocation staging (above) stops two concurrent launches of the same RES/MODE
+# corrupting each other's DOWNLOADS, but OUT_BASE - the final published name - is
+# deliberately shared, not nonce-keyed, so both still publish to the same two paths.
+# Without a lock around the two-mv publish, one launch's own pair of moves can
+# interleave with the other's: A's manifest ends up on disk next to B's video, or the
+# reverse. Two genuinely concurrent launches of the same output, one carrying fixture
+# set A and delayed (via the stub `mv`) between its own two moves specifically to widen
+# that window, the other carrying a distinct fixture set B and undelayed - if
+# publication is not serialized, B's fast pair has a real chance to land inside A's
+# artificially-widened gap.
+# B is launched the instant A's json appears at the final destination - guaranteed still
+# inside A's artificially-widened gap before its own mp4 move - rather than after a guessed
+# time delay, so this does not depend on absolute scheduling timing to land the race.
+clean
+env PATH="$STUB:$PATH" STUB_PUBLISH_DELAY=2 bash "$LAUNCH" 720 test > "$W/raceA.log" 2>&1 &
+RACE_A=$!
+for _ in $(seq 1 100); do
+  [ -f "$FAKEREPO/cloud/sr_test_720.json" ] && break
+  sleep 0.05
+done
+env PATH="$STUB:$PATH" STUB_FIXTURE_SET=B bash "$LAUNCH" 720 test > "$W/raceB.log" 2>&1 &
+RACE_B=$!
+wait "$RACE_A" 2>/dev/null; wait "$RACE_B" 2>/dev/null
+if [ -f "$FAKEREPO/cloud/sr_test_720.json" ] && [ -f "$FAKEREPO/cloud/sr_test_720.mp4" ]; then
+  PUB_WANT="$(python3 -c "import json; print(json.load(open('$FAKEREPO/cloud/sr_test_720.json'))['output']['sha256'])")"
+  PUB_GOT="$(sha256sum "$FAKEREPO/cloud/sr_test_720.mp4" | cut -d' ' -f1)"
+  if [ "$PUB_WANT" = "$PUB_GOT" ]; then
+    ok "publish: two concurrent launches of the same output never interleave a mismatched pair"
+  else
+    bad "publish: two concurrent launches of the same output never interleave a mismatched pair" \
+        "published manifest sha ($PUB_WANT) does not match the published video's actual sha ($PUB_GOT)"
+  fi
+else
+  bad "publish: two concurrent launches of the same output never interleave a mismatched pair" \
+      "expected deliverables missing after both launches: $(ls "$FAKEREPO/cloud" 2>&1)"
+fi
+
 # --- signal-triggered cleanup --------------------------------------------------------
 # A SIGTERM mid-poll must still terminate the pod - the EXIT trap covers INT and TERM too.
 clean
@@ -311,11 +413,24 @@ for _ in $(seq 1 50); do
   sleep 0.1
 done
 kill -TERM "$LPID" 2>/dev/null
-wait "$LPID" 2>/dev/null
+wait "$LPID" 2>/dev/null; TERM_EXIT=$?
 if grep -q "terminating pod" "$W/sigterm.log"; then
   ok "signal: SIGTERM mid-poll still terminates the pod"
 else
   bad "signal: SIGTERM mid-poll still terminates the pod" "$(tail -3 "$W/sigterm.log")"
+fi
+# Binding cleanup directly to INT/TERM meant its own `local rc=$?` captured whatever
+# command happened to finish immediately before the ASYNCHRONOUS signal arrived - which
+# can easily be 0 - not the signal itself. A pod torn down mid-render by a caught signal
+# used to report the whole launcher's exit status as 0: success, to anything checking $?.
+# Reproduced directly with an isolated construct (a `true` immediately before a `sleep`
+# that gets SIGTERM'd) before fixing. The conventional 128+signal status (143 for TERM)
+# is what a caller - a supervising watchdog, a CI step - should see instead.
+if [ "$TERM_EXIT" -eq 143 ]; then
+  ok "signal: a SIGTERM exit reports the conventional 143, not whatever preceded it"
+else
+  bad "signal: a SIGTERM exit reports the conventional 143, not whatever preceded it" \
+      "exit was $TERM_EXIT"
 fi
 # cleanup() ends in `exit $rc`, and `exit` fires the EXIT trap even when called from
 # inside the handler a caught signal already invoked - so a single SIGTERM used to run
@@ -344,6 +459,49 @@ if ls "$FAKEREPO"/cloud/.pod_id_* >/dev/null 2>&1; then
   ok "cleanup: the state file survives a pod-list failure"
 else
   bad "cleanup: the state file survives a pod-list failure" "state file was deleted anyway"
+fi
+
+# --- the by-name fallback, and the path that never reaches it ------------------------
+# The id-based delete fails (STUB_DELETE_FAIL), but the pod is still listed under its own
+# nonce-backed name (STUB_POD_LIST_CONTAINS=self) - this is the fallback that exists
+# because POD_ID can be unreliable or never learned at all, and it was never directly
+# exercised by any prior test despite the stub already supporting it.
+clean
+out="$(env PATH="$STUB:$PATH" STUB_DELETE_FAIL=1 STUB_REMOVE_ID_FAIL=1 STUB_POD_LIST_CONTAINS=self \
+  bash "$LAUNCH" 720 test 2>&1)"
+case "$out" in
+  *"still listed"*"removing by name"*"terminated (by name)"*) \
+    ok "cleanup: an id-based delete failure falls back to removal by the nonce-backed name" ;;
+  *) bad "cleanup: an id-based delete failure falls back to removal by the nonce-backed name" \
+         "$(printf '%s' "$out" | tail -4 | head -1)" ;;
+esac
+if ls "$FAKEREPO"/cloud/.pod_id_* >/dev/null 2>&1; then
+  bad "cleanup: the state file is removed once the by-name fallback succeeds" \
+      "state file survived a successful by-name removal"
+else
+  ok "cleanup: the state file is removed once the by-name fallback succeeds"
+fi
+
+# --- both removal paths failing: STILL BILLING, and the launcher must say so ----------
+clean
+out="$(env PATH="$STUB:$PATH" STUB_DELETE_FAIL=1 STUB_REMOVE_ID_FAIL=1 STUB_REMOVE_FAIL=1 STUB_POD_LIST_CONTAINS=self \
+  bash "$LAUNCH" 720 test 2>&1)"; BILLING_EXIT=$?
+case "$out" in
+  *"TERMINATION FAILED"*"STILL BILLING"*) ok "cleanup: a persistent removal failure reports STILL BILLING" ;;
+  *) bad "cleanup: a persistent removal failure reports STILL BILLING" \
+         "$(printf '%s' "$out" | tail -4 | head -1)" ;;
+esac
+if ls "$FAKEREPO"/cloud/.pod_id_* >/dev/null 2>&1; then
+  ok "cleanup: the recovery record survives when the pod could not be confirmed terminated"
+else
+  bad "cleanup: the recovery record survives when the pod could not be confirmed terminated" \
+      "state file was deleted despite the pod still being listed"
+fi
+if [ "$BILLING_EXIT" -ne 0 ]; then
+  ok "cleanup: the launcher's own exit status reflects a pod that could not be terminated"
+else
+  bad "cleanup: the launcher's own exit status reflects a pod that could not be terminated" \
+      "exited 0 despite STILL BILLING"
 fi
 
 # --- SSH transport failure vs a genuinely dead render -------------------------------

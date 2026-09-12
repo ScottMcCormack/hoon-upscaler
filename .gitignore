@@ -72,6 +72,9 @@ cloud/.pod_id_*
 # verify into each other's files.
 cloud/.*.sr_*.json
 cloud/.*.sr_*.mp4
+# One per OUT_BASE, shared across concurrent launches of the same output on purpose -
+# flock serializes their final publish through it. Empty, reusable, not repository content.
+cloud/.publish_lock_*
 # Renders and their manifests land beside the runner. Per-run local records, like
 # masters/, not repository content. sr_test_720.json was committed here by a `git add -A`
 # that swept up the output of a pod test run.

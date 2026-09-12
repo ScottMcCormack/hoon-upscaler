@@ -46,6 +46,28 @@ IMAGE="${IMAGE:-runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04}"
 [[ "$RES" =~ ^[0-9]+$ ]] && [ "$RES" -gt 0 ] || {
   echo "!! resolution must be a positive integer, got: '$RES'"; exit 1; }
 case "$MODE" in test|full) ;; *) echo "!! unknown mode: '$MODE' (test|full)"; exit 1 ;; esac
+# MAX_MIN reaches `[ N -lt "$MAX_MIN" ]` in the polling loop below, and only there - never
+# validated the way RES is. A non-integer makes that `[` itself fail ("integer expected")
+# rather than raise, which set -e does not catch inside a `while` condition; the loop is
+# simply never entered, DONE stays 0, and the script falls straight through to the ceiling-
+# exceeded path having already paid for pod creation, SSH, and the upload. A zero or
+# negative value reaches the same place by never being less than a comparison that is
+# never true either. Refuse all three here, before anything billable happens.
+[[ "$MAX_MIN" =~ ^[0-9]+$ ]] && [ "$MAX_MIN" -gt 0 ] || {
+  echo "!! MAX_MIN must be a positive integer, got: '$MAX_MIN'"; exit 1; }
+# BATCH_SIZE and TEMPORAL_OVERLAP are spliced, unquoted, into a command string sent to the
+# remote shell over SSH further down (the "starting render" section) - the same standard
+# run_on_pod.sh itself already holds these two to, and for the same reason: unvalidated,
+# "17 --debug_leak" would smuggle an extra flag into the remote command, exactly as it
+# would smuggle one into the inference command line there. Checked here too, before the
+# pod is even created, rather than only where run_on_pod.sh checks it on the pod - a bad
+# value should not survive to pay for pod creation, SSH setup, and the upload first.
+for v in BATCH_SIZE TEMPORAL_OVERLAP; do
+  val="${!v:-}"
+  [ -z "$val" ] && continue
+  [[ "$val" =~ ^[0-9]+$ ]] && [ "$val" -gt 0 ] || {
+    echo "!! $v must be a positive integer, got: '$val'"; exit 1; }
+done
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 case "$MODE" in
@@ -69,14 +91,20 @@ runpodctl pod list >/dev/null 2>&1 || {
 
 DEST="$REPO/cloud"
 POD_ID=""
-STATE="$REPO/cloud/.pod_id"          # gitignored; survives a crash so an orphan is findable
+# Keyed by POD_NAME (the same nonce that isolates the pod name itself), not a single
+# shared filename - two concurrent launches used to share one state file, so whichever
+# wrote it last silently became the only recoverable pod id and the other invocation's
+# crash-recovery record was gone the moment both were running. `ls cloud/.pod_id_*` finds
+# every current one; the recovery instructions above already read the id FROM this file
+# rather than assuming its name, so nothing downstream depends on the old fixed name.
+STATE="$REPO/cloud/.pod_id_${POD_NAME}"   # gitignored; survives a crash so an orphan is findable
 
 # ---------------------------------------------------------------------------
 # Armed before the pod exists. If creation half-succeeds, or anything below dies,
 # this still runs. Terminating a pod that never came up is a harmless no-op.
 # ---------------------------------------------------------------------------
 cleanup() {
-  local rc=$?
+  local rc=$? PLS
   echo
   if [ -n "$POD_ID" ]; then
     echo "=== terminating pod $POD_ID ==="
@@ -88,23 +116,50 @@ cleanup() {
   # Do not trust the exit status of the delete: confirm against the pod list, and sweep
   # anything left behind under our name in case the id was never parsed. A pod that
   # survives this is the only failure here that costs real money.
-  local left
-  left="$(runpodctl pod list -o json 2>/dev/null | grep -o "$POD_NAME" | head -1 || true)"
-  if [ -n "$left" ]; then
-    echo "!! a pod named $POD_NAME is still listed — removing by name"
-    runpodctl remove pods "$POD_NAME" >/dev/null 2>&1 || true
-    sleep 5
-    if runpodctl pod list -o json 2>/dev/null | grep -q "$POD_NAME"; then
-      echo "!! TERMINATION FAILED — a pod is STILL BILLING."
-      echo "!! Terminate it now:  runpodctl pod delete ${POD_ID:-<id from runpodctl pod list>}"
-      echo "!! Pod id, if known, is in $STATE"
-      rc=1
-    else
-      echo "=== terminated (by name) ==="; rm -f "$STATE"
-    fi
-  else
-    [ -n "$POD_ID" ] && { echo "=== terminated, confirmed absent from pod list ==="; rm -f "$STATE"; } || true
-  fi
+  #
+  # A FAILED list call is not the same thing as a SUCCESSFUL list that found nothing, and
+  # both used to look identical here: `2>/dev/null | grep ... || true` collapses "runpodctl
+  # itself errored" and "the pod is genuinely gone" into the same empty string, and empty
+  # meant "confirmed absent, delete the recovery file" either way. A transient network or
+  # API failure at exactly the wrong moment would erase $STATE - the only record of the
+  # pod id - while the pod may still be billing. `pod_still_listed` keeps those apart with
+  # a third return value for "could not tell," used at both call sites this pattern
+  # appears in below (it appeared twice; fixing one and not the other would leave the
+  # second as the next incident).
+  pod_still_listed() {
+    local json
+    json="$(runpodctl pod list -o json 2>/dev/null)" || return 2
+    printf '%s' "$json" | grep -q "$POD_NAME" && return 0 || return 1
+  }
+  pod_still_listed && PLS=0 || PLS=$?
+  case "$PLS" in
+    0)
+      echo "!! a pod named $POD_NAME is still listed — removing by name"
+      runpodctl remove pods "$POD_NAME" >/dev/null 2>&1 || true
+      sleep 5
+      pod_still_listed && PLS=0 || PLS=$?
+      case "$PLS" in
+        0)
+          echo "!! TERMINATION FAILED — a pod is STILL BILLING."
+          echo "!! Terminate it now:  runpodctl pod delete ${POD_ID:-<id from runpodctl pod list>}"
+          echo "!! Pod id, if known, is in $STATE"
+          rc=1 ;;
+        1)
+          echo "=== terminated (by name) ==="; rm -f "$STATE" ;;
+        2)
+          echo "!! could not confirm termination: runpodctl pod list failed."
+          echo "!! NOT deleting the recovery record - check manually: runpodctl pod list"
+          echo "!! Pod id, if known, is in $STATE"
+          rc=1 ;;
+      esac ;;
+    1)
+      [ -n "$POD_ID" ] && { echo "=== terminated, confirmed absent from pod list ==="; rm -f "$STATE"; } || true ;;
+    2)
+      echo "!! could not confirm the pod is gone: runpodctl pod list failed."
+      echo "!! NOT deleting the recovery record - the pod may still be billing under $POD_NAME"
+      echo "!! (id ${POD_ID:-unknown}, in $STATE). Check manually: runpodctl pod list"
+      rc=1 ;;
+  esac
   exit $rc
 }
 trap cleanup EXIT INT TERM
@@ -261,14 +316,45 @@ echo \$!")"
 say "polling for completion"
 MAN="/workspace/cloud/${OUT_BASE}.json"
 DONE=0
+# ssh itself exits 255 when the TRANSPORT failed - it never reached the pod, or the
+# connection dropped mid-command - and this is indistinguishable from a real remote
+# nonzero exit (like kill -0's "no such process") unless the code is checked, not just
+# "did rsh fail". Collapsing them used to mean a transient network blip during `kill -0`
+# read the same as the render having died, which - since the EXIT trap is still armed
+# here - terminated a pod with an ACTIVE, unfinished render on it. Retry a few times
+# before trusting a transport failure at all; if ssh still cannot reach the pod after
+# that, the honest answer is "do not know", not "assume dead" - handled the same way a
+# failed download is handled below: leave the pod for manual recovery rather than let an
+# ambiguous signal trigger automatic termination.
+check_alive() {  # 0 alive, 1 confirmed dead (a real remote answer), 2 could not tell
+  local tries=0 rc
+  while [ "$tries" -lt 3 ]; do
+    rsh "kill -0 $RENDER_PID" 2>/dev/null && return 0
+    rc=$?
+    [ "$rc" -eq 255 ] || return 1
+    tries=$((tries + 1))
+    sleep 5
+  done
+  return 2
+}
 while [ $(( ($(date +%s) - T0) / 60 )) -lt "$MAX_MIN" ]; do
   if rsh "test -f $MAN" 2>/dev/null; then DONE=1; break; fi
-  # A dead process with no manifest means it failed; stop paying to poll a corpse.
-  if ! rsh "kill -0 $RENDER_PID" 2>/dev/null; then
+  check_alive && ALIVE_RC=0 || ALIVE_RC=$?
+  if [ "$ALIVE_RC" -eq 1 ]; then
+    # A dead process with no manifest means it failed; stop paying to poll a corpse.
     sleep 5
     if rsh "test -f $MAN" 2>/dev/null; then DONE=1; break; fi
     say "the render exited without writing a manifest — last 40 lines"
     rsh 'tail -40 /workspace/cloud/render.log' 2>/dev/null || true
+    exit 1
+  elif [ "$ALIVE_RC" -eq 2 ]; then
+    say "cannot reach the pod over SSH after repeated attempts - leaving it running"
+    echo "!! pod $POD_ID ($POD_NAME) may still have an active render. SSH is unreachable," >&2
+    echo "!! not confirmed dead, so it is not being torn down automatically." >&2
+    echo "!! Check manually, and terminate yourself when you are done:" >&2
+    echo "!!   ssh root@$SSH_HOST -p $SSH_PORT" >&2
+    echo "!!   runpodctl pod delete $POD_ID" >&2
+    trap - EXIT INT TERM
     exit 1
   fi
   printf '  %s  %s\n' "$(elapsed)" "$(rsh 'tail -1 /workspace/cloud/render.log' 2>/dev/null | tr -d '\r' | cut -c1-90)"
@@ -279,19 +365,28 @@ done
   rsh 'tail -20 /workspace/cloud/render.log' 2>/dev/null || true; exit 1; }
 
 say "render complete after $(elapsed) — downloading before anything else"
+# Downloaded under a name unique to THIS invocation (the same nonce POD_NAME already
+# carries), not straight to the final $DEST/${OUT_BASE}.* path. OUT_BASE is derived only
+# from RES/MODE, so two concurrent launches of the same resolution and mode - two
+# invocations of this script running at once - would otherwise download and verify into
+# the SAME destination files, and either could publish a mix of the other's bytes, or
+# have its own overwritten mid-verification. Staged here, moved into the shared name only
+# once fully verified below.
+STAGE_JSON="$DEST/.${POD_NAME}.${OUT_BASE}.json"
+STAGE_MP4="$DEST/.${POD_NAME}.${OUT_BASE}.mp4"
 # On exhausted retries here, do NOT let the EXIT trap tear the pod down: the render is
 # the only complete copy until the download and verification below both succeed, and
 # destroying it over a transient network failure is a worse outcome than an idle pod the
 # operator has to terminate by hand. `trap - EXIT INT TERM` clears the trap so plain
 # `exit 1` does not invoke cleanup(); the pod id and manual recovery commands are printed
 # instead.
-if ! scp_retry "root@$SSH_HOST:$MAN" "$DEST/${OUT_BASE}.json" \
-   || ! scp_retry "root@$SSH_HOST:/workspace/cloud/${OUT_BASE}.mp4" "$DEST/${OUT_BASE}.mp4"; then
+if ! scp_retry "root@$SSH_HOST:$MAN" "$STAGE_JSON" \
+   || ! scp_retry "root@$SSH_HOST:/workspace/cloud/${OUT_BASE}.mp4" "$STAGE_MP4"; then
   say "download failed after retries — leaving the pod running for manual recovery"
   echo "!! pod $POD_ID ($POD_NAME) still has the only complete copy of this render." >&2
   echo "!! Retry the download by hand:" >&2
-  echo "!!   scp -P $SSH_PORT root@$SSH_HOST:$MAN $DEST/" >&2
-  echo "!!   scp -P $SSH_PORT root@$SSH_HOST:/workspace/cloud/${OUT_BASE}.mp4 $DEST/" >&2
+  echo "!!   scp -P $SSH_PORT root@$SSH_HOST:$MAN $DEST/${OUT_BASE}.json" >&2
+  echo "!!   scp -P $SSH_PORT root@$SSH_HOST:/workspace/cloud/${OUT_BASE}.mp4 $DEST/${OUT_BASE}.mp4" >&2
   echo "!! Terminate it yourself when you are done:  runpodctl pod delete $POD_ID" >&2
   trap - EXIT INT TERM
   exit 1
@@ -303,7 +398,7 @@ fi
 # necessarily the render, so it is not evidence the pod's copy is bad too - leave the pod
 # up rather than destroy the one place a clean copy is known to exist.
 say "verifying transfer"
-if ! python3 - "$DEST/${OUT_BASE}.json" "$DEST/${OUT_BASE}.mp4" <<'PY'
+if ! python3 - "$STAGE_JSON" "$STAGE_MP4" <<'PY'
 import hashlib, json, sys
 man, mp4 = sys.argv[1], sys.argv[2]
 m = json.load(open(man))
@@ -324,12 +419,18 @@ then
   echo "!! pod $POD_ID ($POD_NAME) is being left running - the LOCAL copy is bad, not" >&2
   echo "!! necessarily the pod's, so retry the download by hand before assuming the" >&2
   echo "!! render itself is broken:" >&2
-  echo "!!   scp -P $SSH_PORT root@$SSH_HOST:$MAN $DEST/" >&2
-  echo "!!   scp -P $SSH_PORT root@$SSH_HOST:/workspace/cloud/${OUT_BASE}.mp4 $DEST/" >&2
+  echo "!!   scp -P $SSH_PORT root@$SSH_HOST:$MAN $DEST/${OUT_BASE}.json" >&2
+  echo "!!   scp -P $SSH_PORT root@$SSH_HOST:/workspace/cloud/${OUT_BASE}.mp4 $DEST/${OUT_BASE}.mp4" >&2
   echo "!! Terminate it yourself when you are done:  runpodctl pod delete $POD_ID" >&2
   trap - EXIT INT TERM
   exit 1
 fi
+
+# Published only now, as the very last step - both files verified and named for this
+# invocation alone, so this mv can never race a concurrent launch's own mv of its own
+# differently-named staged pair.
+mv "$STAGE_JSON" "$DEST/${OUT_BASE}.json"
+mv "$STAGE_MP4" "$DEST/${OUT_BASE}.mp4"
 
 say "done in $(elapsed): $DEST/${OUT_BASE}.mp4"
 # EXIT trap terminates the pod from here.

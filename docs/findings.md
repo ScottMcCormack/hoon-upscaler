@@ -2255,3 +2255,93 @@ its own command line and could never exit. Same defect as the waiter that once s
 hours. Killed by PID, which is the only reliable way.
 
 Total cost of the exercise, including two aborted runs: about $0.08.
+
+## Six more findings, and the suite that would have caught them, 2026-09-12
+
+Review found six real gaps in `cloud/launch_pod.sh`, none exercised by any test - this
+script had zero automated coverage, unlike `run_on_pod.sh` which `tests/cloud_pod.sh`
+already drives against stubs. Built the same kind of harness (`tests/launch_pod.sh`: fake
+`runpodctl`, `ssh`, `scp`, a no-op `sleep`) and fixed all six.
+
+**`MAX_MIN` was never validated, unlike `RES`.** It reaches `[ N -lt "$MAX_MIN" ]` in the
+polling `while` condition and nowhere else. A non-integer makes that `[` itself fail
+("integer expected") rather than raise - `set -e` does not catch a failing test inside a
+`while` condition, it just makes the loop body never run. Reproduced directly:
+`MAX_MIN=abc` skips the polling loop entirely, `DONE` stays 0, and the script falls
+straight to the ceiling-exceeded path having already paid for pod creation, SSH setup, and
+the upload. `0` and negative values reach the same place by a comparison that is never
+true either. Fixed with the same guard `RES` already had.
+
+**`BATCH_SIZE`/`TEMPORAL_OVERLAP` were spliced unvalidated into a remote shell command.**
+`run_on_pod.sh` itself validates these as plain positive integers, specifically because
+they are spliced into an inference command line - `run_on_pod.sh` has that guard for
+exactly this reason. This script splices them into a DIFFERENT command line - one sent
+over `rsh` to the pod's own shell - with no such check, so `BATCH_SIZE='17 --debug_leak'`
+reaches the remote shell verbatim, and would only be caught (if at all) after paying for
+pod creation, SSH, and upload. Fixed with the same guard, run locally before pod creation.
+
+**A failed `runpodctl pod list` during cleanup looked identical to a successful, empty
+one.** `left="$(runpodctl pod list -o json 2>/dev/null | grep ... || true)"` - if the list
+command itself fails (API outage, expired auth, a transient network error at exactly the
+wrong moment), stderr is suppressed, the pipeline produces nothing, and `|| true` turns
+that into the same empty `$left` a genuinely-empty, successful list produces. Empty meant
+"confirmed absent, delete the recovery file" either way - so a `pod list` failure would
+delete `$STATE`, the only record of the pod id, while the pod might still be billing. The
+same pattern appeared **twice** in `cleanup()` (the second list, confirming a by-name
+removal, has the identical shape) - fixing one and leaving the other would just have moved
+the incident to the second occurrence, the exact "standard applied once is not applied"
+failure this project has hit before. Fixed both call sites with a `pod_still_listed()`
+helper returning a THIRD state - list failed, tell the truth - distinct from present/absent.
+
+**`kill -0` over ssh conflated "the process is gone" with "ssh could not reach the pod".**
+Both look like a nonzero exit from `rsh "kill -0 $RENDER_PID"`, but they mean opposite
+things: ssh itself exits 255 on a transport failure (never reached the pod, or the
+connection dropped mid-command), while a real remote answer - including "no such
+process" - comes back as a normal, non-255 exit. Since the `EXIT` trap is still armed at
+this point in the script, treating both the same way meant a transient network blip during
+a poll could tear down a pod with an **active, unfinished render still running on it** -
+destroying the very thing MAX_MIN and the manifest-completion check exist to protect.
+Fixed with a `check_alive()` helper that retries a 255 a few times before trusting it, and
+- if ssh still cannot reach the pod after that - leaves the pod running for manual
+recovery (the same choice already made for a failed download) rather than assuming death.
+
+**Concurrent launches shared both the state file and the download destination.** The
+nonce already added to `POD_NAME` (an earlier finding, this same file) isolates the POD
+itself, but `STATE` was one fixed `cloud/.pod_id` and the download targets
+(`$DEST/${OUT_BASE}.*`) are deterministic from `RES`/`MODE` alone - so two concurrent
+launches of the same resolution and mode would share both, and either could clobber the
+other's recovery id or download/verify into the other's files mid-transfer. Fixed by
+keying `STATE` with the same `POD_NAME` nonce, and by downloading to a per-invocation
+staged name (also nonce-keyed) that is only `mv`'d into the shared final name after both
+files are downloaded and verified - the two concurrent launches' own `mv`s can never
+collide, since neither ever names the same staged file.
+
+**Building the test harness found a bug the review had not: two of these five fixes were
+themselves fatal under `set -e`.** `pod_still_listed; case $? in ...` and
+`check_alive; ALIVE_RC=$?` are both bare statements whose exit status is the PREVIOUS
+command's - under `set -euo pipefail`, a function returning nonzero as a bare statement
+(not part of an `if`/`&&`/`||`/`while` condition) exits the whole script immediately,
+**before** the following line can ever read `$?`. This is the identical class of bug
+`rife_try`'s own comment in this file already documents for a different script
+(`X="$(rife_try ...)"` needing `&& OK=0 || OK=$?`, not a bare assignment) - and it was
+reintroduced here despite that. Caught immediately once the new tests ran: the happy-path
+case failed because `cleanup()` was silently dying right after printing "terminating pod",
+before ever reaching the message that explains what happened next. Fixed both call sites
+with the same `CMD && VAR=0 || VAR=$?` idiom already used everywhere else in this codebase
+that needs a function's exit code without triggering `set -e` on it. This is itself the
+best argument for building the harness rather than trusting the fixes by inspection: three
+of the five fixes above have real, non-obvious control-flow interactions with `set -e`,
+and only running them found the one that was actually wrong.
+
+30 new tests, folded into the suite as its own `launch` group (`tests/run.sh`, mirroring
+how `cloud_pod.sh` is folded in). Cover: every preflight guard refusing before
+`runpodctl create pod` is ever invoked, all three pod-creation-response shapes the real
+API has returned (a plain dict, one nested under another key, and the non-JSON fallback
+token), both SSH-details JSON shapes, the full happy path end to end (including that no
+per-invocation staging debris survives a successful run), SIGTERM mid-poll still
+terminating the pod, a failed `pod list` during cleanup being reported rather than treated
+as absence, a transient SSH transport failure during `kill -0` being retried rather than
+fatal, a persistent one leaving the pod running rather than torn down, a genuinely dead
+render still being caught, and both download failure and hash-mismatch verification
+failure leaving the pod running for manual recovery rather than destroying the only
+complete copy of the render.

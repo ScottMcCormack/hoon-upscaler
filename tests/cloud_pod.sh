@@ -228,6 +228,15 @@ clean; assert_stderr_matches "guard: an explicitly empty resolution is refused" 
 clean; assert_stderr_matches "guard: an empty resolution is refused even with a mode" "resolution was given but empty" \
   env PATH="$STUB:$PATH" WORKSPACE="$WS" bash "$CLOUD/run_on_pod.sh" "" test
 
+# The same hole again, on the third positional this time. CLIP was added after the RES
+# and MODE guards above already existed, and the guard shape was never carried over to
+# it - an explicitly empty CLIP silently took the legacy (unnamespaced) branch, which is
+# exactly the "second source overwrites the first's master and manifest" failure naming
+# a clip exists to prevent. Reproduced directly before fixing: this exact invocation used
+# to exit 0 into the legacy IN/OUT paths with no complaint at all.
+clean; assert_stderr_matches "guard: an explicitly empty clip is refused" "clip was given but empty" \
+  env PATH="$STUB:$PATH" WORKSPACE="$WS" bash "$CLOUD/run_on_pod.sh" 720 test ""
+
 # Extra arguments used to be ignored, so a typo'd flag ran the default render instead.
 # The ceiling moved from 2 to 3 when CLIP became a real argument, so this now tests a
 # FOURTH argument. With three legal positions, `720 test --dry-run` is no longer an extra
@@ -243,6 +252,20 @@ if [ "$HST" -eq 0 ] && [[ "$HELP" == *"test_15s.mp4"* ]] && [[ "$HELP" != *"posi
   ok "--help prints usage and exits 0"
 else
   bad "--help prints usage and exits 0" "exit $HST: $(printf '%s' "$HELP" | tail -1)"
+fi
+
+# The no-CLIP output section named only sr_out_<res>.mp4, omitting that test mode (the
+# invocation --help itself recommends running first) writes sr_test_<res>.mp4 instead -
+# a caller following that advice would not know which file to download. Also pins the
+# usage block's own line range: it is a hardcoded `sed -n` slice of this file, which has
+# already cut usage lines off once before when the docstring above it grew and the range
+# was not updated to match - checking for the LAST usage line (the named-clip example)
+# catches that regression even though "test_15s.mp4" alone would not.
+if [[ "$HELP" == *"sr_test_"* ]] && [[ "$HELP" == *"mvi0081"* ]]; then
+  ok "--help documents the test-mode output name and is not truncated"
+else
+  bad "--help documents the test-mode output name and is not truncated" \
+      "sr_test_ present: $([[ "$HELP" == *sr_test_* ]] && echo yes || echo no), mvi0081 present: $([[ "$HELP" == *mvi0081* ]] && echo yes || echo no)"
 fi
 
 # Overriding batch upward is legitimate — it is how the 720p master gets reproduced on a

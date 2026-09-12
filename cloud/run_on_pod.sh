@@ -13,9 +13,11 @@
 #           ffmpeg -i stabilised.mp4 -vf "crop=312:176:0:0" -crf 0 full_169.mp4
 #           ffmpeg -i full_169.mp4 -frames:v 214 -c copy   test_15s.mp4
 #
-# Output: sr_out_<res>.mp4, or sr_<CLIP>_<mode>_<res>.mp4 for a named clip -
-#         upscaled only. Timing restore, grade and the selective 60fps pass are
-#         done locally afterwards.
+# Output: with no CLIP, sr_test_<res>.mp4 (test mode) or sr_out_<res>.mp4 (full mode) -
+#         the two differ, so the test-first invocation below writes sr_test_<res>.mp4,
+#         not sr_out_<res>.mp4. With a CLIP argument, sr_<CLIP>_<mode>_<res>.mp4 either
+#         way. All of these are upscaled only - timing restore, grade and the selective
+#         60fps pass are done locally afterwards.
 #
 # Usage:  bash run_on_pod.sh 720                    # full clip at 720
 #         bash run_on_pod.sh 720 test               # 15s test first - DO THIS ONE FIRST
@@ -25,10 +27,12 @@
 set -euo pipefail
 case "${1:-}" in
   -h|--help)
-    # 2,23 so the named-clip usage example (line 23) is included - it stopped at 20
-    # before, which cut --help off after the third usage line and never showed how to
-    # actually invoke the CLIP argument the two lines above it document.
-    sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
+    # 2,25 so the named-clip usage example (line 25) is included - this range moves
+    # whenever a line is added or removed above it in the docstring, which has already
+    # bitten this exact line once (it stopped at 20, cutting --help off before the CLIP
+    # usage example two lines below that). Verified against the actual line count rather
+    # than assumed correct after editing the Output section above it.
+    sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
     exit 0 ;;
 esac
 # Reject extra arguments rather than ignoring them: a mistyped invocation should say so,
@@ -58,6 +62,17 @@ if [ "$#" -ge 2 ] && [ -z "$2" ]; then
   echo "!! mode was given but empty. Pass 'test' or 'full' explicitly."; exit 1
 fi
 MODE="${2:-full}"
+# Same hole as RES and MODE above, on the third positional: omitting CLIP means the
+# legacy, unnamespaced clip (documented below), but an explicitly EMPTY one is a wrapper
+# passing through a variable it never set - and the unguarded `${3:-}` could not tell the
+# two apart. Left open, that silently takes the legacy branch: a second source's render
+# and manifest overwrite the first's, which is exactly what naming a clip exists to
+# prevent - the "standard applied once is not applied" case CLAUDE.md warns about,
+# happening here because CLIP was added as a third positional after this guard shape was
+# already established for the other two and never carried over to it.
+if [ "$#" -ge 3 ] && [ -z "$3" ]; then
+  echo "!! clip was given but empty. Pass a clip name explicitly, or omit the argument entirely."; exit 1
+fi
 CLIP="${3:-}"
 case "$MODE" in
   test|full) ;;

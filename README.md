@@ -155,8 +155,10 @@ GRADE="curves=all='0/0 0.5/0.49 1/0.99'" bash pipeline/finish.sh ...
 | `pipeline/selective_interp.py` | Interpolates normal gaps, holds through camera stalls |
 | `pipeline/reframe_src.py` | Solves a deadzone virtual camera from YOLO detections |
 | `pipeline/detect_car.py` | Per-frame subject detection (for tracked reframing) |
-| `cloud/run_on_pod.sh` | Provision-and-run on a rented GPU |
-| `tests/cloud_pod.sh` | Exercises the cloud runner against stubs, no GPU needed |
+| `cloud/launch_pod.sh` | Rents a GPU, runs `run_on_pod.sh` on it, downloads the result, terminates it |
+| `cloud/run_on_pod.sh` | Runs *on* the rented pod: installs, infers, verifies |
+| `tests/launch_pod.sh` | Exercises the pod launcher against stubs, no GPU needed |
+| `tests/cloud_pod.sh` | Exercises the on-pod runner against stubs, no GPU needed |
 | `tools/stall_discontinuity.py` | Scores how abrupt each stall exit is, against the clip's own motion |
 
 `reframe_src.py` and `detect_car.py` are an **experimental tracked-reframing path, not part
@@ -194,20 +196,26 @@ short version: a 24GB card matches a 48GB card for speed at this clip size, and 
 A4000 runs out of memory at 720 but is fine at 540.
 
 The runner needs two inputs beside it, neither of which is in the repo since both are
-media. Build them from the stabilised source, then upload both to the pod:
+media. Build them from the stabilised source:
 
 ```bash
-ffmpeg -i stabilised.mp4 -vf "crop=312:176:0:0" -crf 0 cloud/full_169.mp4
-ffmpeg -i cloud/full_169.mp4 -frames:v 214 -c copy    cloud/test_15s.mp4
+ffmpeg -i stabilised.mp4 -vf "crop=312:176:0:0" -crf 0 input/full_169.mp4
+ffmpeg -i input/full_169.mp4 -frames:v 214 -c copy     cloud/test_15s.mp4
 ```
 
-Run the 15-second one first — `bash run_on_pod.sh 720 test`. It costs about $0.15 and
-catches a broken setup in five minutes instead of forty.
+`cloud/launch_pod.sh` is the entry point — it rents the pod, uploads the input and
+`run_on_pod.sh`, runs it remotely, downloads and verifies the result, and terminates the
+pod whether the render succeeded or the script crashed first. Run the 15-second one
+first — `bash cloud/launch_pod.sh 720 test`. It costs about $0.15 and catches a broken
+setup in five minutes instead of forty. `bash cloud/launch_pod.sh 1080 full` runs the
+whole clip once the test looks right.
 
-`bash tests/cloud_pod.sh` exercises the runner against stubs before you rent anything.
-It proves the script's own logic; it cannot tell you anything about the pod image.
+`bash tests/launch_pod.sh` exercises the launcher against stubs before you rent anything
+— pod creation, SSH, and the pod's own `run_on_pod.sh` are all faked, so a script with
+several real polling loops runs in under a second. `bash tests/cloud_pod.sh` does the
+same for the on-pod runner. Neither can tell you anything about the pod image itself.
 
-See `cloud/run_on_pod.sh` and `docs/findings.md`.
+See `cloud/launch_pod.sh`, `cloud/run_on_pod.sh` and `docs/findings.md`.
 
 ## A note on what this produces
 

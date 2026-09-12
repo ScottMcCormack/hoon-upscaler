@@ -19,8 +19,12 @@
 # owning the pod is what makes automatic termination safe, so this never touches a
 # pod it did not create.
 #
-# Cost guard: MAX_MIN is a ceiling, not a completion check. Hitting it means
-# something is wrong, and the pod dies regardless.
+# Cost guard: MAX_MIN is a ceiling on the polling loop, not an absolute deadline - it is
+# only checked between polls, so it cannot fire while this script is blocked inside a
+# single `ssh`/`scp` call (docs/findings.md records exactly this: a run whose watchdog was
+# clock-based rather than a completion check finished with the pod still billing an hour
+# later). Hitting it on the normal path means something is wrong and tears the pod down;
+# a hang inside one blocking remote call needs an independent, external watchdog instead.
 # ============================================================================
 set -euo pipefail
 
@@ -85,7 +89,15 @@ esac
 # restricted to exactly this invocation.
 POD_NAME="hoon-${OUT_BASE}-$$-$(date +%s)"
 [ -f "$IN" ] || { echo "!! input not found: $IN"; exit 1; }
-command -v runpodctl >/dev/null || { echo "!! runpodctl not on PATH"; exit 1; }
+# runpodctl was the only tool checked here, but ssh/scp reach the pod, python3 parses
+# every JSON response and verifies the transfer, and flock now serializes the publish -
+# missing any one of them used to fail only after a pod was already rented (ssh/scp/
+# python3: mid-render or at publish; flock: "command not found" from inside the `(
+# ... ) 200>` subshell, after the download and verification had already succeeded).
+# Checked here, before `create pod`, same as runpodctl always was.
+for c in runpodctl python3 ssh scp flock; do
+  command -v "$c" >/dev/null || { echo "!! $c not on PATH"; exit 1; }
+done
 runpodctl pod list >/dev/null 2>&1 || {
   echo "!! runpodctl is not authenticated. runpodctl config --apiKey <key>"; exit 1; }
 
@@ -222,6 +234,15 @@ CREATE="$(runpodctl create pod \
 # up to ten minutes waiting on a pod that does not exist and contradicts this script's own
 # claim to terminate only the one it created - worth narrowing rather than leaving as the
 # first resort for any shape the earlier, shallower search did not happen to cover.
+#
+# The recursive JSON search itself has the same residual ambiguity one level up: it returns
+# the first key literally named "id" or "podId" found while walking depth-first, so an
+# unrelated nested object visited earlier (a "machine": {"id": ...}) would still win over
+# the pod's own id sitting deeper. DECLINED further narrowing (e.g. matching against
+# POD_NAME in the response) - there is no published schema for this response to verify a
+# rewrite against, any more than there was for the regex fallback above, and the blast
+# radius is already the same one already capped by cleanup()'s by-name fallback: a wasted
+# SSH wait and a wrong id in a log line, not an unterminated pod. See docs/findings.md.
 POD_ID="$(printf '%s' "$CREATE" | python3 -c '
 import json,re,sys
 raw = sys.stdin.read()

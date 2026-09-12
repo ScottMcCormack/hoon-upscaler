@@ -299,6 +299,44 @@ for v in BATCH_SIZE TEMPORAL_OVERLAP; do
     env "$v=17 --debug_leak" bash "$LAUNCH" 720 test
 done
 
+# runpodctl was the only command ever checked here; python3 parses every JSON response and
+# verifies the transfer, ssh/scp reach the pod, and flock serializes the publish - none of
+# the other four were checked before this round, so a machine missing one used to rent a
+# pod first and find out only mid-render, at publish, or (flock) inside the publish
+# subshell. A minimal PATH is built per case: real symlinks for every command except the
+# one under test, plus the stub `runpodctl` (never the real CLI, which is not installed
+# here) - not $STUB directly, since $STUB itself also provides fake ssh/scp and would mask
+# their absence.
+# Every other command launch_pod.sh calls, real, so the script gets all the way to the
+# check under test rather than failing earlier for an unrelated reason - PATH is this
+# directory ALONE (no $STUB, no system PATH) so a command missing from it is genuinely
+# unresolvable, not just shadowed.
+MINBIN="$W/minbin"; mkdir -p "$MINBIN"
+REALBASH="$(command -v bash)"
+for c in bash basename cut date dirname grep kill mkdir nohup rm seq tail tr \
+         python3 ssh scp flock; do
+  real="$(command -v "$c" 2>/dev/null || true)"
+  [ -n "$real" ] && ln -sf "$real" "$MINBIN/$c"
+done
+ln -sf "$STUB/runpodctl" "$MINBIN/runpodctl"
+for c in python3 ssh scp flock; do
+  clean
+  rm -f "$MINBIN/$c"
+  out="$(env PATH="$MINBIN" "$REALBASH" "$LAUNCH" 720 test 2>&1)"; status=$?
+  calls="$(cat "$STUB_STATE_DIR/runpodctl_calls.log" 2>/dev/null || true)"
+  if [ "$status" -eq 0 ]; then
+    bad "guard: missing $c is refused before pod creation" "exited 0 with $c absent from PATH"
+  elif [[ "$calls" == *"create pod"* ]]; then
+    bad "guard: missing $c is refused before pod creation" "a pod was created despite $c missing: $calls"
+  else
+    case "$out" in
+      *"$c not on PATH"*) ok "guard: missing $c is refused before pod creation" ;;
+      *) bad "guard: missing $c is refused before pod creation" "exit $status, but no '$c not on PATH' in: $(printf '%s' "$out" | tail -1)" ;;
+    esac
+  fi
+  ln -sf "$(command -v "$c")" "$MINBIN/$c"
+done
+
 # --- pod-creation response parsing: every shape the real API has returned -----------
 for shape in dict_id nested non_json; do
   out="$(run_launch env STUB_CREATE_SHAPE="$shape" STUB_MANIFEST_AFTER=0 \
@@ -387,8 +425,17 @@ for _ in $(seq 1 100); do
 done
 env PATH="$STUB:$PATH" STUB_FIXTURE_SET=B bash "$LAUNCH" 720 test > "$W/raceB.log" 2>&1 &
 RACE_B=$!
-wait "$RACE_A" 2>/dev/null; wait "$RACE_B" 2>/dev/null
-if [ -f "$FAKEREPO/cloud/sr_test_720.json" ] && [ -f "$FAKEREPO/cloud/sr_test_720.mp4" ]; then
+# Both exit statuses matter, not just the files left on disk: a hash match with only ONE
+# launch actually reaching `publish` is not evidence of serialization, since a lone
+# publisher trivially produces a self-consistent pair. The race is only proven if BOTH
+# launches ran to completion (each staged, verified, and published its OWN pair) and the
+# lock still kept the interleaving out.
+wait "$RACE_A"; RACE_A_RC=$?
+wait "$RACE_B"; RACE_B_RC=$?
+if [ "$RACE_A_RC" -ne 0 ] || [ "$RACE_B_RC" -ne 0 ]; then
+  bad "publish: two concurrent launches of the same output never interleave a mismatched pair" \
+      "a launch failed outright (A=$RACE_A_RC B=$RACE_B_RC) - not a genuine two-publisher race: $(tail -3 "$W/raceA.log" "$W/raceB.log")"
+elif [ -f "$FAKEREPO/cloud/sr_test_720.json" ] && [ -f "$FAKEREPO/cloud/sr_test_720.mp4" ]; then
   PUB_WANT="$(python3 -c "import json; print(json.load(open('$FAKEREPO/cloud/sr_test_720.json'))['output']['sha256'])")"
   PUB_GOT="$(sha256sum "$FAKEREPO/cloud/sr_test_720.mp4" | cut -d' ' -f1)"
   if [ "$PUB_WANT" = "$PUB_GOT" ]; then

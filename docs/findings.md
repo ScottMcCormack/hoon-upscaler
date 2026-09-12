@@ -85,6 +85,7 @@ one without listing it here fails the suite.
 - [Six more findings, and the suite that would have caught them, 2026-09-12](#six-more-findings-and-the-suite-that-would-have-caught-them-2026-09-12)
 - [An independent review caught two more, one of them in my own fixes above, 2026-09-12](#an-independent-review-caught-two-more-one-of-them-in-my-own-fixes-above-2026-09-12)
 - [Two more real gaps, and two gaps in the tests that should have covered them, 2026-09-12](#two-more-real-gaps-and-two-gaps-in-the-tests-that-should-have-covered-them-2026-09-12)
+- [A fourth review round: one declined, four fixed, 2026-09-12](#a-fourth-review-round-one-declined-four-fixed-2026-09-12)
 
 ## Pre-filters — roughly twenty variants, all unnecessary in the end
 
@@ -2210,7 +2211,12 @@ untracked local script that was deleted, which is why `docs/findings.md` could d
 `EXIT` trap with no referent. `cloud/launch_pod.sh` is that script, and this is what
 running it found.
 
-**Three defects, none visible on reading, none catchable by a stub.**
+**Three defects, none visible on reading, first exposed by running it on a real pod.**
+No stub existed yet to catch them here — `tests/launch_pod.sh`, added later in this same
+PR, does stub exactly the SSH-shape and optional-step cases below, and a fourth review
+round pointed out that saying otherwise no longer matches this file's own test suite. The
+honest claim is narrower: these three were found by hardware, not that they could not have
+been found any other way.
 
 *The pod id parse killed the script silently.* `POD_ID="$(... | grep ... )"` under
 `set -euo pipefail`: grep matched nothing, `pipefail` failed the pipeline, and the failing
@@ -2481,3 +2487,63 @@ reflects the failure. Mutation-tested against the real dispatch logic (swapped t
 assertions across both tests caught it.
 
 Full suite: 191 passed (39 in the `launch` group, up from 32).
+
+## A fourth review round: one declined, four fixed, 2026-09-12
+
+**Declined: narrowing the recursive pod-id search further.** The recursive JSON search
+returns the first key literally named `id` or `podId` it finds while walking the response
+depth-first; a same-shaped but unrelated object nested earlier in iteration order (a
+`"machine": {"id": ...}` sitting before the pod's own `id`) would still win. Two things
+make a further rewrite a poor candidate for a hand-verified fix, the same shape of problem
+as the RIFE scene-cut guard and the VFR detector declined earlier in this project:
+
+- **The real API response shape is not available to verify against.** Every shape this
+  parser and its tests cover (`dict_id`, `nested`, `deeply_nested_with_decoy`, and the raw
+  hardware response the original bug came from) was reconstructed from what `runpodctl`
+  happened to return on past runs, not from published `runpodctl` API documentation. A
+  rewrite keyed on, say, matching the pod's own name in the response would be exactly as
+  unverifiable as the current key-name search - there is no schema to check either against.
+- **The blast radius is already capped.** `cleanup()`'s by-name fallback matches on
+  `POD_NAME` against the pod list independent of whatever `POD_ID` holds, so a wrong parse
+  here does not risk an unterminated, billing pod - the failure mode is a wasted SSH wait
+  and a wrong id in a log line, not runaway cost.
+
+Documented as a known limitation in the parser's own comment rather than guessing at a
+narrower search with nothing real to check it against.
+
+**Fixed: the preflight check only covered `runpodctl`.** `python3` parses every JSON
+response and verifies the transfer, `ssh`/`scp` reach the pod, and `flock` (added the round
+before this one) now serializes the publish - none of the four were checked before this
+round, so a machine missing one rented a pod first and failed only mid-render, at publish,
+or (for `flock`) inside the publish subshell itself. All five commands, `runpodctl`
+included, are now checked in one loop before `create pod` runs.
+
+**Fixed: the concurrent-publish race test could pass with only one publisher.** Both
+`wait` exit statuses were discarded, so a hash match at the end proved only that whichever
+launch reached `publish` produced a self-consistent pair - not that two genuinely
+concurrent publishers were serialized against each other. Both statuses are now captured
+and required to be zero before the published pair is even checked.
+
+**Fixed: `README.md` still described the deleted manual workflow.** It documented building
+the two media inputs and running `run_on_pod.sh` directly, with no mention that
+`launch_pod.sh` now rents the pod, uploads both files, runs it remotely, downloads, and
+terminates - or that `tests/launch_pod.sh` exercises that path. Updated the scripts table
+and the renting-a-GPU section to describe `launch_pod.sh` as the entry point and
+`run_on_pod.sh` as what it invokes on the pod.
+
+**Fixed: the `MAX_MIN` header comment overstated the guarantee.** "The pod dies regardless"
+reads as an absolute deadline; `MAX_MIN` is only checked between polls in the `while`
+condition, so it cannot fire while the script is blocked inside a single `ssh`/`scp` call -
+the exact gap the clock-based watchdog entry above this one already documents. Reworded to
+describe it as a normal-path ceiling, not a guarantee independent of what the script happens
+to be doing when time runs out.
+
+**Corrected: an earlier entry in this same file overclaimed its own limits.** "Three
+defects, none visible on reading, none catchable by a stub" (the launcher's first hardware
+run, above) was true when no stub harness for this script existed yet - but
+`tests/launch_pod.sh`, built later in this same PR, does stub exactly the SSH-shape and
+optional-step cases that entry describes. Reworded to "first exposed by running it on a
+real pod," which is the claim that still holds.
+
+Full suite: 195 passed (43 in the `launch` group, up from 39 - four new cases for the
+widened preflight check).

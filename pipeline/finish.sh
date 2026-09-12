@@ -303,13 +303,13 @@ fi
 # steps in one filter). Sharing this means a future change to stop=8, or to crf, cannot
 # land in one branch and not its twin the way two independently-spelled-out ffmpeg
 # commands invited.
-# RIFE's own schedule stops at the last source instant: there is nothing past it to
-# interpolate into. That was `(n-1)*4+1` only for the 15->60fps case this pipeline used
-# to be fixed to; output_schedule() now derives a different count for each of the other
-# source rates it supports (24, 25, 30, 14.75fps), so no single formula belongs here.
-# Clone a few frames so the filter chain has somewhere to run to, then trim to the count
-# the SOURCE timestamps imply (EXPECT60) rather than to whatever the render happened to
-# produce.
+# RIFE's own schedule now covers the clip's full duration - output_schedule() targets
+# n_src/src_fps seconds, holding the last source frame through its own remaining duration
+# rather than stopping at the moment it begins - but its count and EXPECT60 are computed
+# from two different sources (a frame count and nominal rate, vs. the SOURCE's real
+# per-frame timestamps) and can differ by a frame or so. Clone a few frames so the filter
+# chain has somewhere to run to if RIFE's count fell short, then trim to EXPECT60 rather
+# than to whatever either side happened to produce.
 ffmpeg -y -v error -i "$I60_SRC" \
   -vf "tpad=stop=8:stop_mode=clone,${I60_FILTER},trim=end_frame=$EXPECT60,setpts=PTS-STARTPTS" \
   -c:v libx264 -preset fast -crf 12 -an "$W/i60.mp4"

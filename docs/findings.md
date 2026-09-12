@@ -40,6 +40,7 @@ one without listing it here fails the suite.
 - [The atomicity fix itself broke the RIFE path, and "lossless" wasn't, 2026-09-12](#the-atomicity-fix-itself-broke-the-rife-path-and-lossless-wasnt-2026-09-12)
 - [round() can stop the output schedule short of the last frame, 2026-09-12](#round-can-stop-the-output-schedule-short-of-the-last-frame-2026-09-12)
 - [The schedule's own target was one frame-duration short of the clip's real length, 2026-09-12](#the-schedules-own-target-was-one-frame-duration-short-of-the-clips-real-length-2026-09-12)
+- [A downsampling request would close the decoder's pipe before it finished writing, 2026-09-12](#a-downsampling-request-would-close-the-decoders-pipe-before-it-finished-writing-2026-09-12)
 
 **Grading**
 
@@ -1612,3 +1613,35 @@ this repository has exactly one real VFR file with no independently-known-correc
 check a detector against - a wrong tolerance risks the opposite failure, `finish.sh`'s own
 legitimate CFR intermediate being refused. Documented the constraint in `rife.py`'s own
 usage text instead of guessing at an unverifiable guard.
+
+## A downsampling request would close the decoder's pipe before it finished writing, 2026-09-12
+
+**`output_schedule` never rejected a target rate below the source rate, and `interpolate()`
+silently mishandled it.** A lower target means the schedule does not need every source
+frame - some source indices are skipped entirely - so the frames it skips are never read
+from the decoder's stdout. `interpolate()` closes that pipe once the schedule is exhausted,
+regardless of whether the decoder has finished writing. Reproduced directly, outside the
+model (this is pipe mechanics, not anything CUDA-dependent): a real ffmpeg decoder given ten
+frames, with only eight of them read before its stdout is closed, exits with a non-zero
+"Broken pipe" code. `interpolate()` reports exactly that exit code as `"reading {src}
+failed ... unreadable input, or no decoder for it"` - a confusing, wrong diagnosis for a
+decode that was actually fine; the real cause was never reading the rest of it.
+
+**Fixed by refusing downsampling outright, not by draining the decoder to support it.**
+This tool exists to synthesise frames going *up* to a higher rate - `finish.sh` only ever
+asks for 60fps from sources at or below it, and no supported source rate exceeds 60. Draining
+the unread frames would make downsampling *work*, but that is a feature this tool was never
+designed around and the pipeline never needs; refusing it outright is the smaller, more
+honest change, and matches one of the two fixes the review itself offered. The equal-rate
+case (`target_fps == src_fps`) is deliberately still accepted - it is a no-op, not a
+reduction, and the schedule already reads every source frame in that case by construction.
+Mutation-tested: removing the guard fails the new downsampling-is-refused test and none of
+the others, including the equal-rate one.
+
+**A `finish.sh` comment fell out of date in the same review, from an earlier round's own
+fix.** It said RIFE's schedule "stops at the last source instant," true before the previous
+entry's full-duration fix and false after it - the schedule now holds the last frame through
+its own remaining duration instead of stopping at its start. Corrected to describe what the
+tail-pad step is actually compensating for now: a small residual difference between two
+independently-computed duration estimates (a frame count and nominal rate, vs. the source's
+real per-frame timestamps), not a structural shortfall in RIFE's own schedule.

@@ -833,6 +833,21 @@ PY
 )"
   assert_eq "interp: the 60fps output clock is evenly spaced and covers the clip's full duration at every source rate" "ok" "$SCHED"
 
+  # Downsampling must be refused, not scheduled. A lower target means the schedule can
+  # skip source frames entirely - interpolate()'s decoder is never asked to produce them,
+  # and closing its stdout before it finishes writing the rest of the file makes ffmpeg
+  # exit on a broken pipe, which interpolate() would then report as "unreadable input"
+  # for a decode that was actually fine. Reproduced directly (outside this suite, since it
+  # needs a real ffmpeg subprocess, not the schedule alone): closing a decoder's stdout
+  # after reading only 8 of its 10 written frames makes it exit nonzero on a broken pipe.
+  assert_stderr_matches "interp: downsampling (a lower target than source rate) is refused" \
+    "only interpolates UP" \
+    python -c "import sys;sys.path.insert(0,'$REPO/pipeline');import rife;rife.output_schedule(10, 60, 30)"
+  # The equal-rate case is not downsampling and must still be accepted - a caller asking
+  # for the rate it already has is a (harmless) no-op, not a rate reduction.
+  assert_eq "interp: an equal source and target rate is still accepted" \
+    "10" "$(python -c "import sys;sys.path.insert(0,'$REPO/pipeline');import rife;print(len(rife.output_schedule(10, 15, 15)))")"
+
   # Motion after the first 400 frames must still count. The old default measured only the
   # opening, so a clip that is static early and pans later was recommended minterpolate -
   # exactly the footage this tool exists to catch.

@@ -243,6 +243,19 @@ def output_schedule(n_src, src_fps, target_fps=60.0):
     """
     if n_src < 1 or src_fps <= 0 or target_fps <= 0:
         raise SystemExit(f"!! cannot schedule {n_src} frames at {src_fps}->{target_fps}fps")
+    # Downsampling (target < source) is refused, not attempted. A lower target means the
+    # schedule does not need every source frame - `want` can skip some entirely - and the
+    # ones it skips are never read from interpolate()'s decoder. Closing that decoder's
+    # stdout before it finishes writing makes ffmpeg exit on a broken pipe (reproduced
+    # directly), which is then reported as "unreadable input" for what was actually a
+    # perfectly good decode. This tool only interpolates UP to a higher rate anyway -
+    # finish.sh always targets 60fps from a source at or below it - so this never bites
+    # the pipeline, only a standalone caller asking for a rate the tool was never built
+    # to produce.
+    if target_fps < src_fps:
+        raise SystemExit(
+            f"!! cannot schedule {src_fps}->{target_fps}fps: this only interpolates UP "
+            f"to a higher rate, not down to a lower one")
     # The full playback duration, not the position of the last frame's START. n_src frames
     # at src_fps each occupy 1/src_fps seconds, so the clip runs n_src/src_fps seconds in
     # total - (n_src-1)/src_fps stops one frame-duration short of that, at the moment the

@@ -51,6 +51,10 @@ one without listing it here fails the suite.
 - [A merged stderr stream could silently corrupt the auto-selected interpolator, 2026-09-12](#a-merged-stderr-stream-could-silently-corrupt-the-auto-selected-interpolator-2026-09-12)
 - [A run that failed after grading could leave a fresh 14fps pair beside a stale K5, 2026-09-12](#a-run-that-failed-after-grading-could-leave-a-fresh-14fps-pair-beside-a-stale-k5-2026-09-12)
 
+**A second source**
+
+- [A second source, 2026-09-05 — where the recipe held and where it did not](#a-second-source-2026-09-05--where-the-recipe-held-and-where-it-did-not)
+
 **Grading**
 
 - [The grade was clipping half the picture, 2026-09-06](#the-grade-was-clipping-half-the-picture-2026-09-06)
@@ -69,11 +73,13 @@ one without listing it here fails the suite.
 - [The tests that guarded the manifest could not read it, 2026-09-06](#the-tests-that-guarded-the-manifest-could-not-read-it-2026-09-06)
 - [The fix for an asymmetry was itself asymmetric, 2026-09-07](#the-fix-for-an-asymmetry-was-itself-asymmetric-2026-09-07)
 - [Round three, part two: the same fix missing from a fourth file, twice](#round-three-part-two-the-same-fix-missing-from-a-fourth-file-twice)
+- [A clean auto-merge produced a script that refused its own feature, 2026-09-07](#a-clean-auto-merge-produced-a-script-that-refused-its-own-feature-2026-09-07)
 - [Copilot on the grade: two real defects and one half-right, 2026-09-07](#copilot-on-the-grade-two-real-defects-and-one-half-right-2026-09-07)
 - [Two adversarial reviews of the grade change, 2026-09-07](#two-adversarial-reviews-of-the-grade-change-2026-09-07)
 - [Failing loudly is not the same as failing safely, 2026-09-08](#failing-loudly-is-not-the-same-as-failing-safely-2026-09-08)
 - [Scanning every frame did not close the hole it was supposed to, 2026-09-08](#scanning-every-frame-did-not-close-the-hole-it-was-supposed-to-2026-09-08)
 - [Reviewing my own work found what the reviewers had already fixed, 2026-09-08](#reviewing-my-own-work-found-what-the-reviewers-had-already-fixed-2026-09-08)
+- [The empty-argument guard reached two of three positionals, 2026-09-12](#the-empty-argument-guard-reached-two-of-three-positionals-2026-09-12)
 
 ## Pre-filters — roughly twenty variants, all unnecessary in the end
 
@@ -2139,3 +2145,36 @@ interface either side changed.** Not the diff — the merged result. A diff show
 change as reasonable; only the combined file shows they contradict. The cheap check is to
 run the feature each branch added, since a passing suite proves only that the tests that
 existed still pass.
+
+## The empty-argument guard reached two of three positionals, 2026-09-12
+
+**`CLIP` never got the guard `RES` and `MODE` already had.** An explicitly empty argument -
+a wrapper passing through a variable it never set - is different from an omitted one, and
+both `RES`'s and `MODE`'s guards already refuse the explicit-empty case rather than silently
+substituting a default (`docs/findings.md`, "The fix for an asymmetry was itself
+asymmetric"). `CLIP="${3:-}"` never got the same treatment: `CLIP` was added as a third
+positional after that guard shape already existed for the first two, and it was never
+carried over. Reproduced directly before fixing: `run_on_pod.sh 720 test ""` ran to
+completion against the legacy, unnamespaced input and output paths with no complaint at
+all - exactly the "second source overwrites the first's master and its manifest" failure
+naming a clip exists to prevent, and the third recurrence of the same class of bug this
+file has now recorded for this script (the RES/MODE asymmetry above; the fourth-file miss
+in "Round three, part two"; this). Fixed with the same guard shape used for `RES` and
+`MODE`. Mutation-tested: reverting the added guard fails the new regression case and only
+that case.
+
+**`--help`'s own output-name documentation had the same gap the code did.** The no-CLIP
+Output section named only `sr_out_<res>.mp4`, the full-mode name - omitting that test mode,
+the invocation `--help` itself recommends running first, writes `sr_test_<res>.mp4`
+instead. A caller following that advice would not know which file to look for. Fixed the
+doc, and - since the docstring grew by two lines - re-verified `--help`'s own hardcoded
+`sed -n '2,23p'` range against the new line count rather than assuming it still covered the
+usage block: it now needs `2,25p`. This exact range has already cut usage lines off once
+before ("A clean auto-merge produced a script that refused its own feature," a few entries
+above) when the docstring grew and the range was not updated to match. Pinned this time
+with a test that checks for the LAST usage line specifically, not just the presence of
+`test_15s.mp4` - the previous `--help` test would not have caught a truncated range, since
+it only checked content the range still included either way.
+
+Both mutation-tested independently by reverting each fix and confirming only its own test
+failed. 45 tests pass (was 43).

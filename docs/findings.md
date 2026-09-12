@@ -41,6 +41,7 @@ one without listing it here fails the suite.
 - [round() can stop the output schedule short of the last frame, 2026-09-12](#round-can-stop-the-output-schedule-short-of-the-last-frame-2026-09-12)
 - [The schedule's own target was one frame-duration short of the clip's real length, 2026-09-12](#the-schedules-own-target-was-one-frame-duration-short-of-the-clips-real-length-2026-09-12)
 - [A downsampling request would close the decoder's pipe before it finished writing, 2026-09-12](#a-downsampling-request-would-close-the-decoders-pipe-before-it-finished-writing-2026-09-12)
+- [The standalone interpolation CLI silently dropped every audio track, 2026-09-12](#the-standalone-interpolation-cli-silently-dropped-every-audio-track-2026-09-12)
 
 **Grading**
 
@@ -1575,7 +1576,7 @@ position of the last frame's start, `(n_src-1)/src_fps`, is one whole frame-dura
 of that. Scheduling only to the last frame's start therefore under-counts by design, not
 by a rounding accident this time. Reproduced directly: 15 real frames of 15fps source (one
 full second of footage) used to schedule only 57 output frames at 60fps - 0.95s, not the
-full 1.0s - a genuine, audible 50ms clipped off the end.
+full 1.0s - a genuine, visibly clipped 50ms off the end.
 
 **This does not break `finish.sh`, which has never relied on `output_schedule` reaching the
 full duration on its own.** Its `tpad=stop=8:stop_mode=clone,...,trim=end_frame=$EXPECT60`
@@ -1645,3 +1646,36 @@ its own remaining duration instead of stopping at its start. Corrected to descri
 tail-pad step is actually compensating for now: a small residual difference between two
 independently-computed duration estimates (a frame count and nominal rate, vs. the source's
 real per-frame timestamps), not a structural shortfall in RIFE's own schedule.
+
+## The standalone interpolation CLI silently dropped every audio track, 2026-09-12
+
+**`interpolate()` only ever built a raw-video encoder, so its output never carried audio -
+for anyone using the documented standalone `rife.py interpolate <in> <out>` CLI directly,
+not just `finish.sh`.** Confirmed by reading the encode command itself: the pipe feeding
+the encoder is raw video frames only, with no second input and no `-c:a` anywhere in it.
+`finish.sh` never notices, because it remuxes the ORIGINAL source's audio into its own final
+deliverable regardless of what `interpolate()` writes - but a direct caller publishing
+`interpolate()`'s own output got a silent picture with no warning. Also worth correcting in
+the same pass: an earlier entry in this file described the schedule-duration shortfall as
+"audible" - a poor word choice given the output has no audio track to be audible in at all.
+Fixed to "visibly clipped" instead, here and in the code comment that originated it.
+
+**Fixed by muxing the source's audio in afterward, not by declining as a documented
+limitation.** Unlike the VFR and downsampling findings in the entries above, this one had a
+clean, verifiable fix within reach: stream-copy the audio (untouched by anything this
+function does, so a copy is exact and free) from `src` into the already-finished video,
+only when `src` actually has an audio stream to begin with. Verified the exact ffmpeg
+invocation directly against real fixtures - one with audio, one without - before wiring it
+in: muxing a video-only file with a source that has audio produces a file with both streams
+and the correct frame count; `ffprobe`'s own audio-stream check correctly reports none for a
+source that has none. The mux keeps the same atomicity guarantee the video write already
+has - written to a second temp file, not the final `dst`, and not into `dst_tmp` itself
+(ffmpeg cannot read and write the same path in one invocation) - so a failed mux cannot
+leave a half-written file at the path a caller is about to publish.
+
+**Not covered by an automated test, for the same reason as the last several fixes inside
+`interpolate()`: reaching this code at all needs a real model run, which needs a CUDA torch
+and vendored weights this environment does not have.** Verified what could be verified
+without one: the exact ffmpeg mux and audio-detection commands, run directly against real
+fixture files built for this purpose, confirmed to produce the expected result in both the
+with-audio and without-audio cases.

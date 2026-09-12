@@ -264,8 +264,8 @@ def output_schedule(n_src, src_fps, target_fps=60.0):
     # independently, from the real source's timestamps), but the standalone, documented
     # `rife.py interpolate <in> <out>` CLI has no such step: reproduced directly, one real
     # second of 15fps source (15 frames) used to emit 57 output frames at 60fps (0.95s),
-    # not the 60 (1.0s) a caller publishing that file straight would expect - 50ms short,
-    # audible as a slightly clipped ending on every direct (non-finish.sh) use.
+    # not the 60 (1.0s) a caller publishing that file straight would expect - a visibly
+    # clipped ending, 50ms short, on every direct (non-finish.sh) use.
     span = n_src / src_fps
     # Ceiling, not round(): round() can land BELOW the target instead of at or past it -
     # this was true of the old (n_src-1)-based span too (see the regression test below for
@@ -477,7 +477,33 @@ def interpolate(src, dst, target_fps=60.0, scale=1.0):
     # A truncated interpolation still plays; only the frame count gives it away.
     if got != n_out:
         raise SystemExit(f"!! wrote {got} frames, expected {n_out}")
-    os.replace(dst_tmp, dst)
+    # interpolate() only ever changes VIDEO timing - the raw pipe to the encoder above
+    # carries no audio at all, so without this, the documented standalone `interpolate`
+    # CLI silently dropped every audio track. finish.sh never notices, because it remuxes
+    # the original source's audio into its own final deliverable regardless of what this
+    # function writes - but a direct caller publishing dst as-is got a silent picture.
+    has_audio = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries",
+         "stream=index", "-of", "csv=p=0", src], capture_output=True, text=True
+    ).stdout.strip() != ""
+    if has_audio:
+        # Stream copy, not re-encode: the video is already final, and the audio is
+        # untouched by anything this function does, so copying is exact and free. Muxed
+        # into a second temp file, not into dst_tmp itself (ffmpeg cannot read and write
+        # the same path in one invocation) nor directly into dst (the same atomicity this
+        # function's own video write already needs - a failed mux must not leave a
+        # half-written file at the path a caller is about to publish).
+        dst_tmp2 = f"{root}.partial2{ext}"
+        mux_rc = subprocess.run(
+            ["ffmpeg", "-v", "error", "-y", "-i", dst_tmp, "-i", src,
+             "-map", "0:v:0", "-map", "1:a:0", "-c", "copy", dst_tmp2]).returncode
+        os.remove(dst_tmp)
+        if mux_rc != 0:
+            raise SystemExit(f"!! muxing audio from {src} into {dst} failed "
+                             f"(ffmpeg exit {mux_rc})")
+        os.replace(dst_tmp2, dst)
+    else:
+        os.replace(dst_tmp, dst)
     print(f"    {got} frames")
 
 

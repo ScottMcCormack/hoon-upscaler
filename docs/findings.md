@@ -66,6 +66,7 @@ one without listing it here fails the suite.
 - [Record the parameters or the render is uninterpretable](#record-the-parameters-or-the-render-is-uninterpretable)
 - [Durable output and A40 availability are currently mutually exclusive](#durable-output-and-a40-availability-are-currently-mutually-exclusive)
 - [A pod is not necessarily yours alone](#a-pod-is-not-necessarily-yours-alone)
+- [The launcher, executed for the first time 2026-09-07](#the-launcher-executed-for-the-first-time-2026-09-07)
 
 **What review keeps finding**
 
@@ -81,6 +82,10 @@ one without listing it here fails the suite.
 - [Reviewing my own work found what the reviewers had already fixed, 2026-09-08](#reviewing-my-own-work-found-what-the-reviewers-had-already-fixed-2026-09-08)
 - [The empty-argument guard reached two of three positionals, 2026-09-12](#the-empty-argument-guard-reached-two-of-three-positionals-2026-09-12)
 - [A third recurrence retired the hardcoded line number instead of re-verifying it again, 2026-09-12](#a-third-recurrence-retired-the-hardcoded-line-number-instead-of-re-verifying-it-again-2026-09-12)
+- [Six more findings, and the suite that would have caught them, 2026-09-12](#six-more-findings-and-the-suite-that-would-have-caught-them-2026-09-12)
+- [An independent review caught two more, one of them in my own fixes above, 2026-09-12](#an-independent-review-caught-two-more-one-of-them-in-my-own-fixes-above-2026-09-12)
+- [Two more real gaps, and two gaps in the tests that should have covered them, 2026-09-12](#two-more-real-gaps-and-two-gaps-in-the-tests-that-should-have-covered-them-2026-09-12)
+- [A fourth review round: one declined, four fixed, 2026-09-12](#a-fourth-review-round-one-declined-four-fixed-2026-09-12)
 
 ## Pre-filters — roughly twenty variants, all unnecessary in the end
 
@@ -2198,3 +2203,347 @@ an extra usage line inserted just before the closing separator (standing in for 
 future docstring edit, without waiting for one to actually happen) and confirms `--help`
 still shows it, with no accompanying change to the selection logic itself. Mutation-tested:
 reverting to the fixed-range form fails exactly this new test and no other.
+## The launcher, executed for the first time 2026-09-07
+
+`cloud/run_on_pod.sh` runs *on* a pod. Getting a pod, putting the input on it, retrieving
+the render and shutting it down again was never in the repository - it lived in an
+untracked local script that was deleted, which is why `docs/findings.md` could describe an
+`EXIT` trap with no referent. `cloud/launch_pod.sh` is that script, and this is what
+running it found.
+
+**Three defects, none visible on reading, first exposed by running it on a real pod.**
+No stub existed yet to catch them here — `tests/launch_pod.sh`, added later in this same
+PR, does stub exactly the SSH-shape and optional-step cases below, and a fourth review
+round pointed out that saying otherwise no longer matches this file's own test suite. The
+honest claim is narrower: these three were found by hardware, not that they could not have
+been found any other way.
+
+*The pod id parse killed the script silently.* `POD_ID="$(... | grep ... )"` under
+`set -euo pipefail`: grep matched nothing, `pipefail` failed the pipeline, and the failing
+command substitution exited the script **before** the `[ -n "$POD_ID" ]` diagnostic that
+would have printed the response. A live pod, no error, no id. This is the exact trap
+CLAUDE.md documents and that had just been written into a review brief for someone else.
+The `|| true` on that assignment is load-bearing.
+
+*The SSH details were read from the wrong place.* The parser looked for
+`runtime.ports[].privatePort == 22`. On this API version `runtime` is `null` even while
+`runtimeStatus` is `running`, and the details sit in a top-level `ssh` object with `ip` and
+`port`. The script waited ten minutes for an array that never appears. Both shapes are now
+read, newest first.
+
+*Six `[ test ] && cmd` statements were fatal.* As a bare statement, that returns 1 when the
+test is false, which under `set -e` exits. Every one was an optional step - adding an ssh
+identity, appending an override to an env string.
+
+**What the failures proved, which a successful first run would not have.** Run 1 left a pod
+with no id recorded. The cleanup found it by name and removed it, confirmed against the pod
+list. That fallback existed only because the terminate path was hardened before spending
+anything, and it is the difference between a two-cent lesson and an A40 billing until
+someone notices. Run 2 was stopped with `SIGTERM` rather than left to time out, which
+exercised the trap on signal.
+
+**A ceiling that only works when the script is healthy is not a cost guard.** `MAX_MIN` is
+tested in the polling loop's `while` condition, so while the script is blocked inside an
+`ssh` call it is never evaluated. An independent watchdog - separate process, absolute
+deadline, terminates any `hoon-` pod regardless of what the script is doing - is what
+actually bounds the cost. The in-script ceiling bounds the *normal* case only.
+
+**The successful run.** 7m30s render, 7m48s total from pod creation to teardown.
+
+```
+214 frames, 1276x720, sha256 3f0d0cf8fd21c786e68349869f148c93ff288040b05ad2c48ab0c567e20ba09d
+A40 46068MB, torch 2.8.0.dev20250319+cu128, batch 33 / overlap 5
+```
+
+Verified three ways after the pod was gone: the manifest the pod wrote, an independent
+`ffprobe` frame count, and an independent `sha256sum` locally. The transfer check runs
+*before* teardown deliberately - once the pod is deleted, a truncated download and a
+truncated render are indistinguishable.
+
+**A self-matching `pgrep`, again.** The wait loop watching for the script to exit matched
+its own command line and could never exit. Same defect as the waiter that once spun for 17
+hours. Killed by PID, which is the only reliable way.
+
+Total cost of the exercise, including two aborted runs: about $0.08.
+
+## Six more findings, and the suite that would have caught them, 2026-09-12
+
+Review found six real gaps in `cloud/launch_pod.sh`, none exercised by any test - this
+script had zero automated coverage, unlike `run_on_pod.sh` which `tests/cloud_pod.sh`
+already drives against stubs. Built the same kind of harness (`tests/launch_pod.sh`: fake
+`runpodctl`, `ssh`, `scp`, a no-op `sleep`) and fixed all six.
+
+**`MAX_MIN` was never validated, unlike `RES`.** It reaches `[ N -lt "$MAX_MIN" ]` in the
+polling `while` condition and nowhere else. A non-integer makes that `[` itself fail
+("integer expected") rather than raise - `set -e` does not catch a failing test inside a
+`while` condition, it just makes the loop body never run. Reproduced directly:
+`MAX_MIN=abc` skips the polling loop entirely, `DONE` stays 0, and the script falls
+straight to the ceiling-exceeded path having already paid for pod creation, SSH setup, and
+the upload. `0` and negative values reach the same place by a comparison that is never
+true either. Fixed with the same guard `RES` already had.
+
+**`BATCH_SIZE`/`TEMPORAL_OVERLAP` were spliced unvalidated into a remote shell command.**
+`run_on_pod.sh` itself validates these as plain positive integers, specifically because
+they are spliced into an inference command line - `run_on_pod.sh` has that guard for
+exactly this reason. This script splices them into a DIFFERENT command line - one sent
+over `rsh` to the pod's own shell - with no such check, so `BATCH_SIZE='17 --debug_leak'`
+reaches the remote shell verbatim, and would only be caught (if at all) after paying for
+pod creation, SSH, and upload. Fixed with the same guard, run locally before pod creation.
+
+**A failed `runpodctl pod list` during cleanup looked identical to a successful, empty
+one.** `left="$(runpodctl pod list -o json 2>/dev/null | grep ... || true)"` - if the list
+command itself fails (API outage, expired auth, a transient network error at exactly the
+wrong moment), stderr is suppressed, the pipeline produces nothing, and `|| true` turns
+that into the same empty `$left` a genuinely-empty, successful list produces. Empty meant
+"confirmed absent, delete the recovery file" either way - so a `pod list` failure would
+delete `$STATE`, the only record of the pod id, while the pod might still be billing. The
+same pattern appeared **twice** in `cleanup()` (the second list, confirming a by-name
+removal, has the identical shape) - fixing one and leaving the other would just have moved
+the incident to the second occurrence, the exact "standard applied once is not applied"
+failure this project has hit before. Fixed both call sites with a `pod_still_listed()`
+helper returning a THIRD state - list failed, tell the truth - distinct from present/absent.
+
+**`kill -0` over ssh conflated "the process is gone" with "ssh could not reach the pod".**
+Both look like a nonzero exit from `rsh "kill -0 $RENDER_PID"`, but they mean opposite
+things: ssh itself exits 255 on a transport failure (never reached the pod, or the
+connection dropped mid-command), while a real remote answer - including "no such
+process" - comes back as a normal, non-255 exit. Since the `EXIT` trap is still armed at
+this point in the script, treating both the same way meant a transient network blip during
+a poll could tear down a pod with an **active, unfinished render still running on it** -
+destroying the very thing MAX_MIN and the manifest-completion check exist to protect.
+Fixed with a `check_alive()` helper that retries a 255 a few times before trusting it, and
+- if ssh still cannot reach the pod after that - leaves the pod running for manual
+recovery (the same choice already made for a failed download) rather than assuming death.
+
+**Concurrent launches shared both the state file and the download destination.** The
+nonce already added to `POD_NAME` (an earlier finding, this same file) isolates the POD
+itself, but `STATE` was one fixed `cloud/.pod_id` and the download targets
+(`$DEST/${OUT_BASE}.*`) are deterministic from `RES`/`MODE` alone - so two concurrent
+launches of the same resolution and mode would share both, and either could clobber the
+other's recovery id or download/verify into the other's files mid-transfer. Fixed by
+keying `STATE` with the same `POD_NAME` nonce, and by downloading to a per-invocation
+staged name (also nonce-keyed) that is only `mv`'d into the shared final name after both
+files are downloaded and verified - the two concurrent launches' own `mv`s can never
+collide, since neither ever names the same staged file.
+
+**Building the test harness found a bug the review had not: two of these five fixes were
+themselves fatal under `set -e`.** `pod_still_listed; case $? in ...` and
+`check_alive; ALIVE_RC=$?` are both bare statements whose exit status is the PREVIOUS
+command's - under `set -euo pipefail`, a function returning nonzero as a bare statement
+(not part of an `if`/`&&`/`||`/`while` condition) exits the whole script immediately,
+**before** the following line can ever read `$?`. This is the identical class of bug
+`rife_try`'s own comment in this file already documents for a different script
+(`X="$(rife_try ...)"` needing `&& OK=0 || OK=$?`, not a bare assignment) - and it was
+reintroduced here despite that. Caught immediately once the new tests ran: the happy-path
+case failed because `cleanup()` was silently dying right after printing "terminating pod",
+before ever reaching the message that explains what happened next. Fixed both call sites
+with the same `CMD && VAR=0 || VAR=$?` idiom already used everywhere else in this codebase
+that needs a function's exit code without triggering `set -e` on it. This is itself the
+best argument for building the harness rather than trusting the fixes by inspection: three
+of the five fixes above have real, non-obvious control-flow interactions with `set -e`,
+and only running them found the one that was actually wrong.
+
+30 new tests, folded into the suite as its own `launch` group (`tests/run.sh`, mirroring
+how `cloud_pod.sh` is folded in). Cover: every preflight guard refusing before
+`runpodctl create pod` is ever invoked, all three pod-creation-response shapes the real
+API has returned (a plain dict, one nested under another key, and the non-JSON fallback
+token), both SSH-details JSON shapes, the full happy path end to end (including that no
+per-invocation staging debris survives a successful run), SIGTERM mid-poll still
+terminating the pod, a failed `pod list` during cleanup being reported rather than treated
+as absence, a transient SSH transport failure during `kill -0` being retried rather than
+fatal, a persistent one leaving the pod running rather than torn down, a genuinely dead
+render still being caught, and both download failure and hash-mismatch verification
+failure leaving the pod running for manual recovery rather than destroying the only
+complete copy of the render.
+
+## An independent review caught two more, one of them in my own fixes above, 2026-09-12
+
+A second, independent pass over the six fixes above - reviewing the file while it was
+still being edited, not the final commit - found two further defects, both confirmed by
+direct reproduction before fixing.
+
+**Two of the five `set -e` fixes above were themselves still broken at review time.**
+`check_alive; ALIVE_RC=$?` and `pod_still_listed; case $? in ...` - the very bare-statement
+pattern this same file's entry above says was caught and fixed while building the test
+harness - were flagged again by this second review, against a snapshot taken mid-edit
+before that fix landed. Checked directly against the current file rather than assumed
+stale: both call sites already use the `CMD && VAR=0 || VAR=$?` idiom, and the full test
+suite (32 `launch` cases) passes. Recorded here anyway, because it is worth being honest
+about: a review that finds a bug already caught by your own harness is not a wasted
+review, it is confirmation the harness works.
+
+**`cleanup()` ran twice on a single SIGINT or SIGTERM.** `trap cleanup EXIT INT TERM`
+combined with `cleanup()` ending in `exit $rc` means a caught signal runs `cleanup()` once
+as the INT/TERM handler, and that invocation's own `exit` then fires the EXIT trap a
+*second* time - `exit` always triggers the EXIT trap, including when called from inside
+the handler for a different one. Reproduced directly with an isolated `trap`+`exit`
+construct (a bare counter incremented inside `cleanup()`, printed to a shared variable):
+one `kill -INT` produced two `cleanup called` lines. In the real script this doubles every
+pod-delete attempt, list-confirmation call, and the 5-second sleep in the by-name-removal
+branch, at the exact moment an operator interrupting a run most needs one clear account of
+what happened, not two. Fixed by clearing all three traps as the very first thing inside
+`cleanup()` (`rc` is captured one line earlier, since `trap` is itself a command and would
+otherwise overwrite `$?` first) - once cleared, `cleanup()`'s own `exit` has nothing left
+to re-fire. Mutation-tested: reverting the `trap -` line reproduces exactly two
+`"terminating pod"` lines for one signal; a new test pins the count at exactly one.
+
+**The pod-id parser's raw-text regex fallback could grab the wrong token.** `create pod`
+does not always honour `-o json`, so a raw-text regex (`\b([a-z0-9]{12,20})\b`) exists as a
+last resort when the JSON search fails - but that search only ever checked the top level of
+the parsed JSON and one level of nesting beneath it, so a real response with the id three
+or more levels deep would fall through to the SAME regex a non-JSON response does, over the
+raw JSON text. That text can easily contain other fields of the identical shape - a
+`machineId`, `templateId`, `registryAuthId` - and the regex has no way to prefer the pod's
+own id over one of those if it happens to appear first. This does not risk unbounded
+billing (the by-name match in `cleanup()` still finds and terminates the real pod
+regardless of what `POD_ID` holds), but a wrong id contradicts this script's own claim to
+terminate only the pod it created, and would waste up to ten minutes in the SSH-wait loop
+querying a pod that does not exist. Fixed by making the JSON search recursive - walking the
+entire parsed structure for an `id`/`podId` key at any depth, in dicts and lists both -
+so the fragile raw-text regex is reached only when the response genuinely is not JSON, not
+merely because the id sits deeper than the search used to look. Mutation-tested with a
+constructed response carrying the real id three levels deep and a decoy same-shaped token
+earlier in the raw text: the old (shallow) search fell through to the regex and deleted the
+decoy; the fix finds the real id directly. Checked against the actual `runpodctl` call the
+script made, not just whether the run finished - a wrong id does not visibly break the
+happy path on its own, which is exactly why it needed a call-log assertion rather than an
+end-to-end one to pin.
+
+Two new tests (32 total in the `launch` group). Full suite: 184 passed.
+
+## Two more real gaps, and two gaps in the tests that should have covered them, 2026-09-12
+
+The next Copilot review round on the launcher, after all of the above, found two further
+correctness defects and two coverage gaps in `tests/launch_pod.sh` itself.
+
+**`cleanup()` used directly as the INT/TERM handler could report success for a run a
+signal actually killed.** `local rc=$?` reads whatever exit status happened to precede the
+signal - which can easily be 0, since the signal arrives asynchronously, unrelated to
+whatever command last finished. Reproduced directly: `true` (rc 0) immediately before a
+`sleep` that gets SIGTERM'd, with `cleanup` bound straight to INT/TERM, reports the whole
+launcher's exit as 0 - a pod torn down mid-render by a signal reads as a successful run to
+anything checking `$?` (a supervising watchdog, a CI step). Fixed by binding INT/TERM to
+`exit 130`/`exit 143` (the conventional 128+signal statuses) instead of `cleanup` directly,
+and leaving `cleanup` bound only to EXIT - which those `exit` calls still trigger, now with
+the correct status for `cleanup`'s own `local rc=$?` to capture. This also means `cleanup`
+is no longer ever invoked directly as a signal handler at all, closing the double-fire risk
+by a second, independent route (the `trap - EXIT INT TERM` inside `cleanup` from the
+previous round stays anyway, as a second layer against any other path that might call it
+directly). New test asserts the launcher's own exit status is exactly 143 after a SIGTERM,
+not merely that cleanup ran - the previous round's test would not have caught this, since
+it only checked for "terminating pod" in the log, which still appeared either way.
+
+**Per-invocation download staging did not make the final publish atomic.** The previous
+round's fix (nonce-keyed staging names) stops two concurrent launches of the same
+resolution/mode from corrupting each other's downloads mid-verification - but `OUT_BASE`,
+the *published* name, is deliberately shared, not nonce-keyed, and the two `mv`s that
+publish a verified pair were never serialized against each other. Two concurrent launches'
+`mv` pairs could still interleave: A's manifest published, then B's manifest AND video
+published, then A's video overwriting B's - leaving a manifest paired with the wrong
+video. Unlike the `finish.sh` atomicity limitation declined earlier in this project (a
+narrow window against an external kill, no concurrent readers), this is two of this
+script's *own* invocations racing under perfectly ordinary use - a foreseeable scenario,
+not a crash - so it was fixed rather than declined: `flock` now serializes the two-mv
+publish, scoped to a lock file keyed by `OUT_BASE` (the one thing in this script
+deliberately shared across concurrent launches targeting the same output, rather than
+nonce-isolated like everything else). Verified with a genuinely concurrent test - two real
+backgrounded launcher invocations, one carrying a distinguishable second fixture set and
+undelayed, the other artificially widened (via a stub `mv` that sleeps after the manifest
+move) to give the other a real window - checked against the actual published files' content
+(the manifest's recorded sha256 against the actual mp4's sha256), not just that the run
+finished. Timing-dependent races are usually flaky to pin; making this one deterministic
+took care: the second launch is started the instant the first's manifest appears at the
+final destination (a poll, not a guessed delay), so it does not depend on absolute
+scheduling to land inside the artificially-widened window. Confirmed 5/5 across repeated
+runs both ways (interleaves without the lock, never does with it) before trusting the test.
+
+**The preflight guard tests never checked the invariant they claimed to.** Every guard
+above is supposed to refuse *before* `runpodctl create pod` is ever invoked - the entire
+reason these guards exist here rather than relying on `run_on_pod.sh`'s own copies, which
+only run after a pod is already billing. The tests asserted only the diagnostic message
+and exit status; none inspected the `runpodctl` call log, despite a comment claiming that
+check was already being made. A guard that printed the right refusal and created the pod
+anyway would have passed every one of them. Added a shared `assert_refused_before_billing`
+helper checking all three - nonzero exit, the expected message, and no `create pod` line in
+the log - and mutation-tested it directly: patched a copy of the guard to also fire
+`runpodctl create pod` after refusing, confirmed the new assertion catches it where the old
+one would not have.
+
+**The cleanup tests never exercised the by-name fallback or the "still billing" branch.**
+Three stub controls (`STUB_POD_LIST_CONTAINS`, `STUB_DELETE_FAIL`, `STUB_REMOVE_FAIL`)
+existed for exactly this and were never used in a dedicated test. Needed a stateful stub to
+test properly, not just a static one: "the pod is still listed" has to become "gone" once a
+removal actually succeeds, or the second confirmation check inside `cleanup()` never sees
+the outcome the test intends. Added a `pod_removed` marker file the stub sets on a
+successful delete/remove call and checks before answering a subsequent list query, and
+split what had been one shared "remove" control into separate ones for the id-based
+fallback and the by-name one, so a test can make one succeed while the other fails and
+actually exercise a single specific path rather than always exercising both or neither.
+Two new tests: an id-based delete failure correctly falls back to removal by the
+nonce-backed name and cleans up the recovery record; both removal paths failing correctly
+reports "STILL BILLING", preserves the recovery record, and the launcher's own exit status
+reflects the failure. Mutation-tested against the real dispatch logic (swapped the
+"still listed" and "confirmed absent" case labels in `cleanup()`) - 4 of the 5 new
+assertions across both tests caught it.
+
+Full suite: 191 passed (39 in the `launch` group, up from 32).
+
+## A fourth review round: one declined, four fixed, 2026-09-12
+
+**Declined: narrowing the recursive pod-id search further.** The recursive JSON search
+returns the first key literally named `id` or `podId` it finds while walking the response
+depth-first; a same-shaped but unrelated object nested earlier in iteration order (a
+`"machine": {"id": ...}` sitting before the pod's own `id`) would still win. Two things
+make a further rewrite a poor candidate for a hand-verified fix, the same shape of problem
+as the RIFE scene-cut guard and the VFR detector declined earlier in this project:
+
+- **The real API response shape is not available to verify against.** Every shape this
+  parser and its tests cover (`dict_id`, `nested`, `deeply_nested_with_decoy`, and the raw
+  hardware response the original bug came from) was reconstructed from what `runpodctl`
+  happened to return on past runs, not from published `runpodctl` API documentation. A
+  rewrite keyed on, say, matching the pod's own name in the response would be exactly as
+  unverifiable as the current key-name search - there is no schema to check either against.
+- **The blast radius is already capped.** `cleanup()`'s by-name fallback matches on
+  `POD_NAME` against the pod list independent of whatever `POD_ID` holds, so a wrong parse
+  here does not risk an unterminated, billing pod - the failure mode is a wasted SSH wait
+  and a wrong id in a log line, not runaway cost.
+
+Documented as a known limitation in the parser's own comment rather than guessing at a
+narrower search with nothing real to check it against.
+
+**Fixed: the preflight check only covered `runpodctl`.** `python3` parses every JSON
+response and verifies the transfer, `ssh`/`scp` reach the pod, and `flock` (added the round
+before this one) now serializes the publish - none of the four were checked before this
+round, so a machine missing one rented a pod first and failed only mid-render, at publish,
+or (for `flock`) inside the publish subshell itself. All five commands, `runpodctl`
+included, are now checked in one loop before `create pod` runs.
+
+**Fixed: the concurrent-publish race test could pass with only one publisher.** Both
+`wait` exit statuses were discarded, so a hash match at the end proved only that whichever
+launch reached `publish` produced a self-consistent pair - not that two genuinely
+concurrent publishers were serialized against each other. Both statuses are now captured
+and required to be zero before the published pair is even checked.
+
+**Fixed: `README.md` still described the deleted manual workflow.** It documented building
+the two media inputs and running `run_on_pod.sh` directly, with no mention that
+`launch_pod.sh` now rents the pod, uploads both files, runs it remotely, downloads, and
+terminates - or that `tests/launch_pod.sh` exercises that path. Updated the scripts table
+and the renting-a-GPU section to describe `launch_pod.sh` as the entry point and
+`run_on_pod.sh` as what it invokes on the pod.
+
+**Fixed: the `MAX_MIN` header comment overstated the guarantee.** "The pod dies regardless"
+reads as an absolute deadline; `MAX_MIN` is only checked between polls in the `while`
+condition, so it cannot fire while the script is blocked inside a single `ssh`/`scp` call -
+the exact gap the clock-based watchdog entry above this one already documents. Reworded to
+describe it as a normal-path ceiling, not a guarantee independent of what the script happens
+to be doing when time runs out.
+
+**Corrected: an earlier entry in this same file overclaimed its own limits.** "Three
+defects, none visible on reading, none catchable by a stub" (the launcher's first hardware
+run, above) was true when no stub harness for this script existed yet - but
+`tests/launch_pod.sh`, built later in this same PR, does stub exactly the SSH-shape and
+optional-step cases that entry describes. Reworded to "first exposed by running it on a
+real pod," which is the claim that still holds.
+
+Full suite: 195 passed (43 in the `launch` group, up from 39 - four new cases for the
+widened preflight check).

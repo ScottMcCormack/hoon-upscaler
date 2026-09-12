@@ -61,8 +61,27 @@ experiments/*
 .claude/worktrees/
 
 # --- cloud run scratch ---
+# .pod_id_<name> records the pod a run created, so an orphan is findable after a crash. It
+# is per-run state, and committing it would invite terminating someone else's pod by id.
+# Named per invocation (a glob, not one fixed name) since concurrent launches each get
+# their own - a single shared state file meant one invocation's crash-recovery record
+# could be silently overwritten by another's.
+cloud/.pod_id_*
+# Downloads are staged under a per-invocation name before being published to the fixed
+# name below, so two concurrent launches of the same resolution/mode cannot download or
+# verify into each other's files.
+cloud/.*.sr_*.json
+cloud/.*.sr_*.mp4
+# One per OUT_BASE, shared across concurrent launches of the same output on purpose -
+# flock serializes their final publish through it. Empty, reusable, not repository content.
+cloud/.publish_lock_*
 # Renders and their manifests land beside the runner. Per-run local records, like
 # masters/, not repository content. sr_test_720.json was committed here by a `git add -A`
 # that swept up the output of a pod test run.
 cloud/sr_*.json
-cloud/.pod_id
+
+# --- flash CLI state ---
+# .flash/logs/activity.log was tracked and has been empty in every committed version, so
+# nothing leaked. It is still the log of the CLI whose `flash login` writes an api_key,
+# and a log file inside the repo is one careless command from committing a credential.
+.flash/

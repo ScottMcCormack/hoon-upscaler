@@ -1440,6 +1440,29 @@ if want cloud; then
   fi
 fi
 
+# ---------------------------------------------------------------------------
+# The pod launcher, driven against stubs the same way. A separate file for the same
+# reason cloud_pod.sh is: it fakes runpodctl, ssh and scp entirely.
+# ---------------------------------------------------------------------------
+if want launch; then
+  echo
+  LAUNCH_TIMEOUT="${LAUNCH_TIMEOUT:-300}"
+  LAUNCH_OUT="$(timeout --signal=KILL "$LAUNCH_TIMEOUT" bash "$REPO/tests/launch_pod.sh" 2>&1)"; LAUNCH_STATUS=$?
+  printf '%s\n' "$LAUNCH_OUT" | sed -n '2,$p' | grep -E 'PASS|FAIL|^$' || true
+  LAUNCH_PLAIN="$(printf '%s' "$LAUNCH_OUT" | sed 's/\x1b\[[0-9;]*m//g')"
+  LP="$(printf '%s' "$LAUNCH_PLAIN" | grep -cE '^  PASS ' || true)"
+  LF="$(printf '%s' "$LAUNCH_PLAIN" | grep -cE '^  FAIL ' || true)"
+  PASS=$((PASS + LP)); FAIL=$((FAIL + LF))
+  if [ "$LAUNCH_STATUS" -ne 0 ]; then
+    if [ "$LAUNCH_STATUS" -eq 124 ]; then
+      FAILED_NAMES+=("pod launcher: killed at the ${LAUNCH_TIMEOUT}s timeout — it should take seconds, so suspect a missing stub letting a real command block")
+    else
+      FAILED_NAMES+=("pod launcher (exit $LAUNCH_STATUS) — see bash tests/launch_pod.sh")
+    fi
+    [ "$LF" -eq 0 ] && FAIL=$((FAIL + 1))
+  fi
+fi
+
 echo
 if [ "$FAIL" -eq 0 ]; then
   printf '\033[32m%d passed\033[0m\n' "$PASS"

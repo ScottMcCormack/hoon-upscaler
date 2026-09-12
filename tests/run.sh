@@ -625,6 +625,788 @@ PY
 fi
 
 # ---------------------------------------------------------------------------
+# Interpolator selection. On a fast pan, minterpolate stretches blocks into newly revealed
+# content that has no correspondence to warp from; the 32px search window is a ruled-out
+# hypothesis rather than the cause, and block motion is selected on as a proxy. The
+# choice between it and RIFE is made from a measurement. Only the
+# selection and the guards are tested - running RIFE needs a CUDA torch and model
+# weights that this repo does not vendor, so the model itself is out of scope here.
+# ---------------------------------------------------------------------------
+echo
+echo "interpolation"
+
+if want interp; then
+  R="$REPO/pipeline/rife.py"; G_RIFE="$R"
+
+  # Five cases below vary only which fake RIFE_HOME is passed; sharing the probe itself
+  # means what is actually under test - which directory - is the only thing left at each
+  # call site, instead of being buried in four lines of boilerplate repeated five times.
+  rife_available() {  # rife_available <RIFE_HOME>   -> "yes" or "no"
+    RIFE_HOME="$1" python -c "
+import sys
+sys.path.insert(0, '$REPO/pipeline')
+import rife
+print('yes' if rife.available() else 'no')"
+  }
+
+  # The padding multiple is derived from scale, not from the network stride. Getting it
+  # wrong fails deep inside the flow blocks, so it is worth pinning.
+  assert_eq "interp: pad multiple at scale 1.0"  "128" "$(python -c "import sys;sys.path.insert(0,'$REPO/pipeline');import rife;print(rife.pad_to(1.0))")"
+  assert_eq "interp: pad multiple at scale 0.5"  "256" "$(python -c "import sys;sys.path.insert(0,'$REPO/pipeline');import rife;print(rife.pad_to(0.5))")"
+  assert_stderr_matches "interp: an unsupported scale is refused" "scale must be one of" \
+    python -c "import sys;sys.path.insert(0,'$REPO/pipeline');import rife;rife.pad_to(0.7)"
+
+  # A near-static clip must not pull in a GPU dependency it does not need; a fast-panning
+  # one must not silently get the interpolator that warps it.
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=s=256x144:r=15:d=3" \
+    -frames:v 40 -c:v libx264 -crf 20 -pix_fmt yuv420p "$W/static.mp4"
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=s=1024x576:r=15:d=3" \
+    -vf "crop=256:144:'min(iw-256,n*90)':100" -frames:v 40 -fps_mode passthrough \
+    -c:v libx264 -crf 20 -pix_fmt yuv420p "$W/panning.mp4"
+  assert_eq "interp: a near-static clip picks minterpolate" \
+    "minterpolate" "$(python "$R" recommend "$W/static.mp4" 2>/dev/null)"
+  assert_eq "interp: a fast-panning clip picks rife" \
+    "rife" "$(python "$R" recommend "$W/panning.mp4" 2>/dev/null)"
+
+  # Extra CLI arguments must be refused, not silently ignored - the same convention
+  # cloud/run_on_pod.sh already enforces. Without this, a typo'd --explain ran to
+  # completion with no explanation and no complaint, and a stray extra argument to
+  # interpolate would still launch the model.
+  assert_stderr_matches "interp: a mistyped --explain is refused, not silently ignored" \
+    "unknown option '--explan'" \
+    python "$R" recommend "$W/static.mp4" --explan
+  # The option check must run BEFORE block_motion() scans the clip, not after - otherwise
+  # an unreadable video path reports "could not measure motion" for what is actually a
+  # mistyped flag, and a readable one prints a partial recommendation before refusing.
+  # A nonexistent path makes this the only possible error if the option is checked first.
+  assert_stderr_matches "interp: a mistyped --explain is refused before the clip is scanned" \
+    "unknown option '--explan'" \
+    python "$R" recommend "$W/does_not_exist.mp4" --explan
+  assert_stderr_matches "interp: an extra argument to 'why' is refused" \
+    "unexpected extra argument" \
+    python "$R" why extra_garbage
+  assert_stderr_matches "interp: an extra argument to 'measure' is refused" \
+    "unexpected extra argument" \
+    python "$R" measure "$W/static.mp4" extra_garbage
+  # The rationale above names 'interpolate' specifically - an extra argument there was
+  # the case that used to reach the (expensive) model instead of stopping at the arity
+  # check. The guard runs before any model import, so this needs no real input file to
+  # stay CUDA-independent: it never gets far enough to open one.
+  assert_stderr_matches "interp: a mistyped --no-audio is refused, not silently ignored" \
+    "unknown option '--explain', expected --no-audio" \
+    python "$R" interpolate nonexistent_src.mp4 nonexistent_dst.mp4 60 1.0 --explain
+  assert_stderr_matches "interp: an extra argument to 'interpolate' is refused" \
+    "unexpected extra argument" \
+    python "$R" interpolate nonexistent_src.mp4 nonexistent_dst.mp4 60 1.0 extra_garbage
+  # --no-audio is a FLAG, not fixed to one position - target_fps and scale are each
+  # independently optional per the usage line, so skipping either or both must not break
+  # the flag. Reproduced first: the fixed-argv[6] version raised a raw ValueError from
+  # float("--no-audio") for `interpolate in out --no-audio` (both optionals skipped).
+  # Missing input files make every form below fail identically further in - at the
+  # ffprobe stage, not the argument parse - which is exactly what proves parsing itself
+  # accepted all four shapes.
+  for form in "--no-audio" "60 --no-audio" "--no-audio 60" "60 1.0 --no-audio"; do
+    assert_stderr_matches "interp: --no-audio parses in any position (args: $form)" \
+      "could not read video info" \
+      python "$R" interpolate nonexistent_src.mp4 nonexistent_dst.mp4 $form
+  done
+
+  # A malformed target_fps/scale must be a clean usage error, not float()'s own raw
+  # ValueError traceback - this documented CLI otherwise validates every mistake before
+  # doing work. No real input file needed: parsing happens before interpolate() is
+  # even called.
+  assert_stderr_matches "interp: an unparseable target_fps is refused, not a raw traceback" \
+    "target_fps must be a number, got ''" \
+    python "$R" interpolate nonexistent_src.mp4 nonexistent_dst.mp4 ""
+  assert_stderr_matches "interp: an unparseable scale is refused, not a raw traceback" \
+    "scale must be a number, got 'abc'" \
+    python "$R" interpolate nonexistent_src.mp4 nonexistent_dst.mp4 60 abc
+  # nan and inf both PARSE as floats - the guard that matters is output_schedule()'s own,
+  # which needs a real, valid source so it actually gets reached. Both used to fail
+  # uncleanly further in: math.ceil(nan) raises ValueError, math.ceil(inf) raises
+  # OverflowError, and "nan/inf both fail a plain <= 0 test" is exactly why the earlier
+  # guard let them through in the first place - reproduced directly before fixing.
+  assert_stderr_matches "interp: a non-finite target_fps (nan) is refused" \
+    "cannot schedule" \
+    python "$R" interpolate "$W/static.mp4" "$W/nan_out.mp4" nan
+  assert_stderr_matches "interp: a non-finite target_fps (inf) is refused" \
+    "cannot schedule" \
+    python "$R" interpolate "$W/static.mp4" "$W/inf_out.mp4" inf
+
+  # An unknown INTERP must not fall through to a default the caller did not ask for.
+  SRC="$W/isrc.mp4"; RAW="$W/iraw.mp4"; IOUT="$W/iout"; mkdir -p "$IOUT"
+  mk_vfr_source "$SRC" 40 5 8
+  mk_upscaled "$RAW" "$(frame_count "$SRC")"
+  clean_iout() { rm -rf "$IOUT"; mkdir -p "$IOUT"; }
+  clean_iout; assert_stderr_matches "interp: an unknown INTERP is refused" "unknown INTERP" \
+    env INTERP=bogus bash "$REPO/pipeline/finish.sh" "$RAW" I "$SRC" "$IOUT"
+
+  # Refused before any work runs, not after it - a typo'd INTERP must not pay for luma-fix,
+  # cadence-restore and grading first. Reproduced the old behaviour before fixing it: with
+  # validation left at its original spot (after grading, before interpolation), this same
+  # scenario left I_lumafix_14fps.mp4 sitting in IOUT despite the nonzero exit.
+  if [ -f "$IOUT/I_lumafix_14fps.mp4" ]; then
+    bad "interp: an unknown INTERP is refused before any stage runs" \
+        "I_lumafix_14fps.mp4 exists - grading (and everything before it) ran first"
+  else
+    ok "interp: an unknown INTERP is refused before any stage runs"
+  fi
+
+  # Forcing rife when it is not installed must refuse, not quietly produce the output the
+  # caller explicitly asked not to have.
+  clean_iout; assert_stderr_matches "interp: forced rife without a setup is refused" \
+    "RIFE cannot run here" \
+    env INTERP=rife RIFE_HOME="$W/no-such-rife" bash "$REPO/pipeline/finish.sh" "$RAW" I "$SRC" "$IOUT"
+
+  # Same property, forced-RIFE side: a re-run of an existing TAG with a bad RIFE_HOME must
+  # not leave a stale 60fps deliverable beside freshly-replaced 14fps ones. Reproduced: with
+  # the availability probe left at its original spot, this refusal happened AFTER both
+  # 14fps files were already moved into IOUT.
+  if [ -f "$IOUT/I_lumafix_14fps.mp4" ]; then
+    bad "interp: forced rife without a setup is refused before any stage runs" \
+        "I_lumafix_14fps.mp4 exists - grading (and everything before it) ran first"
+  else
+    ok "interp: forced rife without a setup is refused before any stage runs"
+  fi
+
+  # The recommendation must not depend on output size. Block motion in pixels scales with
+  # resolution, so a 60px threshold judged the SAME footage "minterpolate" at width 440 and
+  # "rife" at width 520 — decided by the render size rather than by the motion, and this
+  # pipeline renders at both 720p and 1080p. The measure is a fraction of width for that
+  # reason; this pins it.
+  # Rendered NATIVELY at both sizes, not one derived by upscaling the other. An earlier
+  # version of this fixture bicubic-upscaled the 1x render 4x before re-measuring it, and
+  # that upscale step itself introduced a resolution-dependent optical-flow artifact
+  # (verified: the OLD un-windowed statistic already showed a 6.2x spread between the two
+  # from this cause alone, just landing both sides of the old 3% threshold so the test
+  # passed by coincidence). Two independent native renders of the same pan speed - the
+  # comparison real 720p/1080p footage actually is - avoid that confound entirely.
+  # Pan speed chosen for a WIDE margin from MOTION_THRESHOLD (6%), not just any speed
+  # that lands on one side. A first version measured 5.06%/5.65% - only ~1pt below
+  # threshold - and passed locally but failed in CI: a different ffmpeg/OpenCV build
+  # measures optical flow on the exact same synthetic pan slightly differently, and a
+  # ~1pt margin was not enough to survive that. This version measures ~3.1%/3.2%, roughly
+  # half the threshold, which cross-platform floating-point noise in flow estimation is
+  # not expected to close.
+  RSRC="$W/ires.mp4"
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=s=320x240:r=15:d=4" -frames:v 40 \
+    -vf "crop=280:210:min(iw-280\,n*1):15" -c:v libx264 -crf 18 -pix_fmt yuv420p "$RSRC"
+  RSMALL="$(python "$REPO/pipeline/rife.py" recommend "$RSRC" 2>/dev/null)"
+  RBIGSRC="$W/ires_big_native.mp4"
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=s=1280x960:r=15:d=4" -frames:v 40 \
+    -vf "crop=1120:840:min(iw-1120\,n*4):60" -c:v libx264 -crf 18 -pix_fmt yuv420p "$RBIGSRC"
+  RBIG="$(python "$REPO/pipeline/rife.py" recommend "$RBIGSRC" 2>/dev/null)"
+  if [ -n "$RSMALL" ] && [ "$RSMALL" = "$RBIG" ]; then
+    ok "interp: the same footage picks the same interpolator at 1x and 4x ($RSMALL)"
+  else
+    bad "interp: the same footage picks the same interpolator at 1x and 4x" \
+        "1x said '${RSMALL:-<none>}', 4x said '${RBIG:-<none>}'"
+  fi
+
+  # available() must ask the same question the caller asks. finish.sh runs the venv
+  # interpreter directly, so a python that EXISTS but is not executable used to pass the
+  # availability check and then fall through to the system python — no torch, or the wrong
+  # torch, and a failure reported from deep inside the model instead of here.
+  FAKE="$W/fake_rife"
+  mkdir -p "$FAKE/venv/bin" "$FAKE/Practical-RIFE/train_log"
+  printf '#!/bin/sh\nexit 0\n' > "$FAKE/venv/bin/python"
+  : > "$FAKE/Practical-RIFE/train_log/flownet.pkl"
+  : > "$FAKE/Practical-RIFE/train_log/RIFE_HDv3.py"
+  : > "$FAKE/Practical-RIFE/train_log/IFNet_HDv3.py"
+  chmod -x "$FAKE/venv/bin/python"
+  AV="$(rife_available "$FAKE")"
+  assert_eq "interp: a non-executable venv python counts as unavailable" "no" "$AV"
+  chmod +x "$FAKE/venv/bin/python"
+  AV2="$(rife_available "$FAKE")"
+  assert_eq "interp: an executable venv python counts as available" "yes" "$AV2"
+
+  # The output clock must be evenly spaced at every source rate. This is the property
+  # "no judder" actually means, and it is asserted on the SCHEDULE rather than on rendered
+  # frames: RIFE's output on synthetic footage is not a reliable cadence measurement,
+  # because a textureless test pattern gives it nothing to estimate flow from. The
+  # schedule is the part this repository decides.
+  #
+  # The defect it replaces: interpolating to a whole-number multiple and resampling to 60
+  # afterwards. 24fps x3 is 72fps, and `fps=60` on that advanced the picture in a mix of
+  # 1/72 and 2/72 steps and repeated some frames outright — measured 0/1/2-frame steps
+  # across one second — while frame count, rate and duration all looked correct.
+  # 48 frames divides evenly against every rate below; 46 does not, and that is the point
+  # of including it - round()-based rounding can land BELOW the true target for a
+  # non-aligned count, so a suite that only ever tries 48 never exercises the case where
+  # the schedule falls short.
+  #
+  # The target itself is the clip's FULL playback duration (n_src/src_fps seconds), not
+  # the position of the last frame's START ((n_src-1)/src_fps) - n_src frames each occupy
+  # 1/src_fps seconds, so stopping at the last frame's start is one frame-duration short of
+  # the clip actually ending. Reproduced: 15 frames of real 15fps source (1.0s) used to
+  # schedule only 57 output frames at 60fps (0.95s), not 60 - a real 50ms short for the
+  # documented standalone `interpolate` CLI, which has no padding step of its own;
+  # finish.sh's tpad/trim masks it for the one caller that has one, by padding to a
+  # duration computed independently from the real source's timestamps.
+  SCHED="$(python - "$REPO" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1] + "/pipeline")
+import rife
+bad = []
+for n_src in (46, 48):
+    for src, tgt in ((15, 60), (24, 60), (25, 60), (30, 60), (14.75, 60), (60, 60)):
+        sched = rife.output_schedule(n_src, src, tgt)
+        pos = [i + f for i, f in sched]
+        steps = [b - a for a, b in zip(pos, pos[1:])]
+        if not steps:
+            bad.append(f"{n_src}@{src}->{tgt}: no steps"); continue
+        ideal = src / tgt
+        worst = max(abs(s - ideal) for s in steps)
+        if worst > 1e-9:
+            bad.append(f"{n_src}@{src}->{tgt}: step deviates by {worst:.3e} (ideal {ideal:.4f})")
+        if any(i > n_src - 1 or i < 0 for i, _ in sched):
+            bad.append(f"{n_src}@{src}->{tgt}: source index out of range")
+        covered = len(sched) / tgt
+        true_duration = n_src / src
+        if covered < true_duration - 1e-6:
+            bad.append(f"{n_src}@{src}->{tgt}: schedule covers {covered:.4f}s, short of the true {true_duration:.4f}s")
+print("ok" if not bad else "bad: " + "; ".join(bad[:3]))
+PY
+)"
+  assert_eq "interp: the 60fps output clock is evenly spaced and covers the clip's full duration at every source rate" "ok" "$SCHED"
+
+  # Downsampling must be refused, not scheduled. A lower target means the schedule can
+  # skip source frames entirely - interpolate()'s decoder is never asked to produce them,
+  # and closing its stdout before it finishes writing the rest of the file makes ffmpeg
+  # exit on a broken pipe, which interpolate() would then report as "unreadable input"
+  # for a decode that was actually fine. Reproduced directly (outside this suite, since it
+  # needs a real ffmpeg subprocess, not the schedule alone): closing a decoder's stdout
+  # after reading only 8 of its 10 written frames makes it exit nonzero on a broken pipe.
+  assert_stderr_matches "interp: downsampling (a lower target than source rate) is refused" \
+    "only interpolates UP" \
+    python -c "import sys;sys.path.insert(0,'$REPO/pipeline');import rife;rife.output_schedule(10, 60, 30)"
+  # The equal-rate case is not downsampling and must still be accepted - a caller asking
+  # for the rate it already has is a (harmless) no-op, not a rate reduction.
+  assert_eq "interp: an equal source and target rate is still accepted" \
+    "10" "$(python -c "import sys;sys.path.insert(0,'$REPO/pipeline');import rife;print(len(rife.output_schedule(10, 15, 15)))")"
+
+  # publish_with_audio() is interpolate()'s own audio-muxing tail, pulled out on purpose:
+  # unlike the rest of interpolate(), it needs no CUDA torch or model to reach, so it can
+  # be exercised directly against real ffmpeg fixtures instead of only reasoned about.
+  AUDIOVID="$W/audiovid_only.mp4"
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=s=64x64:r=60:d=1" \
+    -c:v libx264 -crf 18 -pix_fmt yuv420p "$AUDIOVID"
+
+  # No audio in the source: the video passes through untouched, no audio stream appears.
+  NOAUDIO_SRC="$W/noaudio_src.mp4"
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=s=64x64:r=15:d=1" \
+    -c:v libx264 -crf 18 -pix_fmt yuv420p "$NOAUDIO_SRC"
+  cp "$AUDIOVID" "$W/pub_noaudio.mp4"
+  python -c "
+import sys; sys.path.insert(0, '$REPO/pipeline')
+import rife
+rife.publish_with_audio('$W/pub_noaudio.mp4', '$NOAUDIO_SRC', '$W/pub_noaudio_out.mp4')
+"
+  assert_eq "interp: publish_with_audio passes video through untouched when the source has no audio" \
+    "video" "$(ffprobe -v error -show_entries stream=codec_type -of csv=p=0 "$W/pub_noaudio_out.mp4" | tr '\n' ',' | sed 's/,$//')"
+
+  # A source whose audio the destination container accepts as-is: stream-copied, not
+  # re-encoded - the codec name survives unchanged.
+  AAC_SRC="$W/aac_src.mp4"
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=s=64x64:r=15:d=1" \
+    -f lavfi -i "sine=frequency=440:duration=1" -c:v libx264 -crf 18 -pix_fmt yuv420p \
+    -c:a aac "$AAC_SRC"
+  cp "$AUDIOVID" "$W/pub_aac.mp4"
+  python -c "
+import sys; sys.path.insert(0, '$REPO/pipeline')
+import rife
+rife.publish_with_audio('$W/pub_aac.mp4', '$AAC_SRC', '$W/pub_aac_out.mp4')
+"
+  assert_eq "interp: publish_with_audio stream-copies audio the container already accepts" \
+    "aac" "$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$W/pub_aac_out.mp4")"
+
+  # A source whose audio codec MP4 flatly refuses via stream copy - reproduced directly
+  # before writing this: ffmpeg exits nonzero muxing raw pcm_u8 into an MP4 container
+  # ("codec not currently supported in container"). publish_with_audio must still
+  # succeed, by falling back to an AAC re-encode, not lose the (expensive, in the real
+  # caller) video to a container mismatch.
+  PCM_SRC="$W/pcm_src.mka"
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "sine=frequency=440:duration=1" \
+    -c:a pcm_u8 "$PCM_SRC"
+  cp "$AUDIOVID" "$W/pub_pcm.mp4"
+  PUB_PCM_LOG="$(python -c "
+import sys; sys.path.insert(0, '$REPO/pipeline')
+import rife
+rife.publish_with_audio('$W/pub_pcm.mp4', '$PCM_SRC', '$W/pub_pcm_out.mp4')
+" 2>&1)"
+  if [ -f "$W/pub_pcm_out.mp4" ] && \
+     [ "$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$W/pub_pcm_out.mp4")" = "aac" ]; then
+    ok "interp: publish_with_audio falls back to AAC when the source codec cannot be stream-copied"
+  else
+    bad "interp: publish_with_audio falls back to AAC when the source codec cannot be stream-copied" \
+        "$PUB_PCM_LOG"
+  fi
+
+  # If BOTH mux attempts fail, the completed video-only interpolation must survive, not
+  # be deleted before the failure is even reported - that file is the only copy of an
+  # otherwise-complete (in the real caller, expensive) render. Forced by pointing dst at
+  # a directory that does not exist, so writing dst_tmp2 fails regardless of audio codec.
+  cp "$AUDIOVID" "$W/pub_bothfail.mp4"
+  PUB_BOTHFAIL_LOG="$(python -c "
+import sys; sys.path.insert(0, '$REPO/pipeline')
+import rife
+rife.publish_with_audio('$W/pub_bothfail.mp4', '$AAC_SRC', '$W/no_such_dir/out.mp4')
+" 2>&1)"; PUB_BOTHFAIL_RC=$?
+  if [ "$PUB_BOTHFAIL_RC" -eq 0 ]; then
+    bad "interp: publish_with_audio preserves the video when both mux attempts fail" \
+        "expected a nonzero exit, got 0"
+  elif [ ! -f "$W/pub_bothfail.mp4" ]; then
+    bad "interp: publish_with_audio preserves the video when both mux attempts fail" \
+        "video_tmp was deleted despite both mux attempts failing: $PUB_BOTHFAIL_LOG"
+  else
+    ok "interp: publish_with_audio preserves the video when both mux attempts fail"
+  fi
+
+  # A SUCCESSFUL mux is not the same fact as the final publish succeeding - os.replace()
+  # itself can still fail (dst already exists as a directory, a different filesystem,
+  # permissions). video_tmp must survive that too, not just a failed mux. Forced by
+  # pointing dst at an existing directory: the mux into dst_tmp2 succeeds cleanly (a
+  # normal AAC source), only the final os.replace(dst_tmp2, dst) fails.
+  cp "$AUDIOVID" "$W/pub_replacefail.mp4"
+  mkdir -p "$W/dst_is_a_dir.mp4"
+  PUB_REPLACEFAIL_LOG="$(python -c "
+import sys; sys.path.insert(0, '$REPO/pipeline')
+import rife
+rife.publish_with_audio('$W/pub_replacefail.mp4', '$AAC_SRC', '$W/dst_is_a_dir.mp4')
+" 2>&1)"; PUB_REPLACEFAIL_RC=$?
+  if [ "$PUB_REPLACEFAIL_RC" -eq 0 ]; then
+    bad "interp: publish_with_audio preserves the video when the final publish fails" \
+        "expected a nonzero exit, got 0"
+  elif [ ! -f "$W/pub_replacefail.mp4" ]; then
+    bad "interp: publish_with_audio preserves the video when the final publish fails" \
+        "video_tmp was deleted despite the final os.replace() failing: $PUB_REPLACEFAIL_LOG"
+  else
+    ok "interp: publish_with_audio preserves the video when the final publish fails"
+  fi
+
+  # Motion after the first 400 frames must still count. The old default measured only the
+  # opening, so a clip that is static early and pans later was recommended minterpolate -
+  # exactly the footage this tool exists to catch.
+  LATE="$W/ilate.mp4"
+  ffmpeg -hide_banner -loglevel error -y \
+    -f lavfi -i "color=c=gray:s=160x120:r=15:d=30" \
+    -f lavfi -i "testsrc2=s=320x240:r=15:d=8" \
+    -filter_complex "[0:v]trim=end_frame=420,setpts=PTS-STARTPTS[a];\
+[1:v]trim=end_frame=60,setpts=PTS-STARTPTS,crop=160:120:min(iw-160\,n*16):40[b];[a][b]concat=n=2:v=1[v]" \
+    -map "[v]" -frames:v 480 -c:v libx264 -crf 18 -pix_fmt yuv420p "$LATE"
+  LATE_ALL="$(python "$G_RIFE" recommend "$LATE" 2>/dev/null)"
+  LATE_400="$(python - "$REPO" "$LATE" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1] + "/pipeline")
+import rife
+m = rife.block_motion(sys.argv[2], sample=400)
+print("rife" if m > rife.MOTION_THRESHOLD else "minterpolate")
+PY
+)"
+  if [ "$LATE_ALL" = "rife" ] && [ "$LATE_400" = "minterpolate" ]; then
+    ok "interp: a pan after frame 400 still selects rife (opening-only said $LATE_400)"
+  else
+    bad "interp: a pan after frame 400 still selects rife" \
+        "whole clip said '${LATE_ALL:-<none>}', first 400 said '${LATE_400:-<none>}'"
+  fi
+
+  # A severe pan under 5% of the clip's total length must still select rife. p95 over
+  # the whole clip discards its top 5% by definition, so a single clip-wide percentile
+  # cannot see a real, severe pan shorter than that share - reproduced: 40 fast-panning
+  # frames in a 990-frame clip (4.0%, same pan speed the 12.5% fixture above correctly
+  # catches) measured 0.00% and picked minterpolate before block_motion was windowed.
+  SHORTPAN="$W/ishortpan.mp4"
+  ffmpeg -hide_banner -loglevel error -y \
+    -f lavfi -i "color=c=gray:s=160x120:r=15:d=70" \
+    -f lavfi -i "testsrc2=s=320x240:r=15:d=6" \
+    -filter_complex "[0:v]trim=end_frame=950,setpts=PTS-STARTPTS[a];\
+[1:v]trim=end_frame=40,setpts=PTS-STARTPTS,crop=160:120:min(iw-160\,n*20):40[b];[a][b]concat=n=2:v=1[v]" \
+    -map "[v]" -frames:v 990 -c:v libx264 -crf 18 -pix_fmt yuv420p "$SHORTPAN"
+  SHORTPAN_REC="$(python "$REPO/pipeline/rife.py" recommend "$SHORTPAN" 2>/dev/null)"
+  assert_eq "interp: a severe pan under 5% of the clip still selects rife" "rife" "$SHORTPAN_REC"
+
+  # A severe pan confined to the clip's closing ~1s must still select rife, even when it
+  # does not align with the stride grid. The grid's starts are 0, stride, 2*stride, ... and
+  # stop at the last multiple <= (len(arr) - win); when (len(arr) - win) is not itself a
+  # multiple of stride, the true final window is never tried on its own, only ever
+  # diluted alongside earlier, calmer frames inside the nearest window the grid does reach.
+  # 70 calm frames + a 15-frame pan (chosen so the gap is present, verified by direct
+  # computation rather than assumed) reproduced it: 4.70% with only the grid's windows
+  # (picks minterpolate) against 8.64% once the true final window is included (picks rife).
+  TAILPAN="$W/itailpan.mp4"
+  ffmpeg -hide_banner -loglevel error -y \
+    -f lavfi -i "color=c=gray:s=160x120:r=15:d=10" \
+    -f lavfi -i "testsrc2=s=320x240:r=15:d=2" \
+    -filter_complex "[0:v]trim=end_frame=70,setpts=PTS-STARTPTS[a];\
+[1:v]trim=end_frame=15,setpts=PTS-STARTPTS,crop=160:120:min(iw-160\,n*7):40[b];[a][b]concat=n=2:v=1[v]" \
+    -map "[v]" -frames:v 85 -c:v libx264 -crf 18 -pix_fmt yuv420p "$TAILPAN"
+  TAILPAN_REC="$(python "$REPO/pipeline/rife.py" recommend "$TAILPAN" 2>/dev/null)"
+  assert_eq "interp: a severe pan confined to the clip's closing second still selects rife" \
+    "rife" "$TAILPAN_REC"
+
+  # The same dilution the tail fix above addressed can happen at ANY interior offset the
+  # stride grid skips over, not just at the clip's end - a stride-7 grid over a win-15
+  # window never tries a start 3 or 4 past a multiple of 7, so a pan landing exactly
+  # there is only ever seen diluted by whichever neighbouring grid window it straddles.
+  # Tested on a plain array, not a rendered clip: windowed_max_mean() is block_motion's
+  # own windowing pulled out as a pure function specifically so this needs no video or
+  # optical flow to pin, the same reasoning behind output_schedule() being separable.
+  # A synthetic array with one exact win-length "hot" region at that worst offset proves
+  # it directly - the strided approach (this project's own previous code, reproduced
+  # here rather than assumed) finds only 8.0, diluted by six calm samples it cannot avoid
+  # from the nearest grid window; scanning every start finds the true 10.0.
+  WMM_CHECK="$(python -c "
+import sys; sys.path.insert(0, '$REPO/pipeline')
+import numpy as np
+import rife
+
+win, stride = 15, 7
+arr = np.zeros(100)
+pan_start = 24  # 24 = 3*7 + 3: three past the nearest grid start, the worst offset
+arr[pan_start:pan_start + win] = 10.0
+
+new = rife.windowed_max_mean(arr, win)
+
+starts = list(range(0, len(arr) - win + 1, stride))
+if starts[-1] != len(arr) - win:
+    starts.append(len(arr) - win)
+old = max(arr[i:i + win].mean() for i in starts)
+
+if abs(new - 10.0) < 1e-9 and abs(old - 8.0) < 1e-9:
+    print('ok')
+else:
+    print(f'bad: new={new} (want 10.0), old={old} (want 8.0, confirming the old gap is real)')
+")"
+  assert_eq "interp: windowed_max_mean finds a pan at any interior offset, not only ones the old stride grid tried" \
+    "ok" "$WMM_CHECK"
+
+  # A partial setup must not pass. interpolate() does `from train_log.RIFE_HDv3 import
+  # Model`, so weights alone are not enough: the old check looked only for flownet.pkl and
+  # let a half-installed model through to fail with ModuleNotFoundError from inside the
+  # import — the exact failure this guard exists to pre-empt.
+  rm -f "$FAKE/Practical-RIFE/train_log/IFNet_HDv3.py"
+  AV4="$(rife_available "$FAKE")"
+  assert_eq "interp: a model missing IFNet_HDv3.py counts as unavailable" "no" "$AV4"
+  : > "$FAKE/Practical-RIFE/train_log/IFNet_HDv3.py"
+
+  rm -f "$FAKE/Practical-RIFE/train_log/RIFE_HDv3.py"
+  AV3="$(rife_available "$FAKE")"
+  assert_eq "interp: weights without the model code count as unavailable" "no" "$AV3"
+  : > "$FAKE/Practical-RIFE/train_log/RIFE_HDv3.py"
+
+  # The required-file check covers three files; the two tests above only ever removed
+  # the model CODE, never the weights themselves. Symmetric case: model code present,
+  # flownet.pkl missing - without this, dropping it from the checked tuple in production
+  # would leave the suite green.
+  rm -f "$FAKE/Practical-RIFE/train_log/flownet.pkl"
+  AV8="$(rife_available "$FAKE")"
+  assert_eq "interp: model code without the weights counts as unavailable" "no" "$AV8"
+  : > "$FAKE/Practical-RIFE/train_log/flownet.pkl"
+
+  # Files present is not the same as importable. A venv without torch — or with one built
+  # for a different CUDA line — passes every file check and then fails deep inside the
+  # model, after auto-selection has already committed to RIFE. available() asks the
+  # interpreter that will actually run it; this fixture has every file and an interpreter
+  # that cannot import.
+  BROKEN="$W/broken_rife"
+  mkdir -p "$BROKEN/venv/bin" "$BROKEN/Practical-RIFE/train_log"
+  printf '#!/bin/sh\nexit 1\n' > "$BROKEN/venv/bin/python"
+  chmod +x "$BROKEN/venv/bin/python"
+  for fpart in flownet.pkl RIFE_HDv3.py IFNet_HDv3.py; do
+    : > "$BROKEN/Practical-RIFE/train_log/$fpart"
+  done
+  AV5="$(rife_available "$BROKEN")"
+  assert_eq "interp: a venv that cannot import the model counts as unavailable" "no" "$AV5"
+
+  # The two asserts INSIDE the probe (torch.cuda.is_available(), then an actual kernel
+  # launch) were not pinned by anything above: every fixture's "venv/bin/python" is a
+  # shell script that exits 0 or 1 unconditionally, ignoring the probe source it is
+  # handed, so deleting either assert from unavailable_reason() would still leave every
+  # test above green. Both fixtures below use a REAL python interpreter with a fake
+  # `torch` and `train_log.RIFE_HDv3` on PYTHONPATH, so the probe's own source actually
+  # runs - one where cuda.is_available() is False, one where it is True but the kernel
+  # launch itself raises (the shape of the Blackwell-no-kernels case CLAUDE.md records).
+  mkfake_rife_probe() {  # mkfake_rife_probe <dir> <torch.py contents via stdin>
+    local dir="$1"
+    mkdir -p "$dir/venv/bin" "$dir/Practical-RIFE/train_log" "$dir/fakemods"
+    for fpart in flownet.pkl IFNet_HDv3.py; do
+      : > "$dir/Practical-RIFE/train_log/$fpart"
+    done
+    printf 'class Model:\n    pass\n' > "$dir/Practical-RIFE/train_log/RIFE_HDv3.py"
+    cat > "$dir/fakemods/torch.py"
+    printf '#!/bin/sh\nexec env PYTHONPATH="%s" python3 "$@"\n' "$dir/fakemods" \
+      > "$dir/venv/bin/python"
+    chmod +x "$dir/venv/bin/python"
+  }
+
+  NOCUDA="$W/nocuda_rife"
+  mkfake_rife_probe "$NOCUDA" <<'PY'
+class _Cuda:
+    @staticmethod
+    def is_available():
+        return False
+cuda = _Cuda()
+def ones(*a, **k):
+    raise AssertionError("should not be reached: is_available() already returned False")
+PY
+  AV6="$(rife_available "$NOCUDA")"
+  assert_eq "interp: a venv that imports fine but reports no CUDA device counts as unavailable" \
+    "no" "$AV6"
+
+  NOKERNEL="$W/nokernel_rife"
+  mkfake_rife_probe "$NOKERNEL" <<'PY'
+class _Cuda:
+    @staticmethod
+    def is_available():
+        return True
+cuda = _Cuda()
+class _NoKernelTensor:
+    def sum(self):
+        raise RuntimeError("no kernel image is available for execution on the device")
+def ones(*a, **k):
+    return _NoKernelTensor()
+PY
+  AV7="$(rife_available "$NOKERNEL")"
+  assert_eq "interp: a venv that reports CUDA but cannot launch a kernel counts as unavailable" \
+    "no" "$AV7"
+
+  # RIFE_HOME="" must resolve the same way rife.py's own bash caller resolves it.
+  # finish.sh reads it as `${RIFE_HOME:-default}`, which treats an explicitly empty value
+  # as unset. `os.environ.get("RIFE_HOME", default)` does not - it only substitutes the
+  # default when the key is ABSENT, so an empty string used to resolve to abspath(""),
+  # the cwd at import time, while finish.sh kept using the real default path. The two
+  # halves of the pipeline would then probe and run two different installations.
+  EMPTYHOME="$(RIFE_HOME="" python -c "
+import sys
+sys.path.insert(0, '$REPO/pipeline')
+import rife
+print(rife.RIFE_HOME)")"
+  assert_eq "interp: an explicitly empty RIFE_HOME resolves to the same default as unset" \
+    "$REPO/work/rife" "$EMPTYHOME"
+
+  # --explain must actually explain. finish.sh reads the recommendation from line 1 and the
+  # measurement from line 2 of ONE call; if the second line goes missing the log silently
+  # loses the number that justified the choice.
+  EXPL="$(python "$REPO/pipeline/rife.py" recommend "$W/ires.mp4" --explain 2>/dev/null)"
+  case "$(printf '%s\n' "$EXPL" | sed -n 2p)" in
+    *"block motion"*"% of width"*) ok "interp: recommend --explain reports the measurement" ;;
+    *) bad "interp: recommend --explain reports the measurement" \
+           "second line was: $(printf '%s\n' "$EXPL" | sed -n 2p)" ;;
+  esac
+
+  clean_iout
+  out="$(env INTERP=minterpolate bash "$REPO/pipeline/finish.sh" "$RAW" I "$SRC" "$IOUT" 2>&1)"
+  if [ -f "$IOUT/I_lumafix_K5.mp4" ]; then ok "interp: explicit minterpolate still completes"
+  else bad "interp: explicit minterpolate still completes" "$(printf '%s' "$out" | tail -1)"; fi
+
+  # ...and auto must fall BACK rather than fail, since minterpolate still produces
+  # something watchable for most footage. The comment above used to sit on the test
+  # immediately preceding it, which runs INTERP=minterpolate explicitly and therefore
+  # never went near the fallback: auto was not exercised, and neither was its warning.
+  # RIFE_HOME points somewhere empty, so `available()` is false and the branch is forced.
+  # The fallback only exists on the rife branch, so the fixture has to actually recommend
+  # rife and the assertion has to say so. Matching any "auto -> " line accepted a run that
+  # chose minterpolate and never entered the fallback at all — and the previous fixture sat
+  # at 3.80% against a 3.0% threshold, close enough to drift across it silently.
+  clean_iout
+  PANSRC="$W/ipan.mp4"
+  mk_vfr_source "$PANSRC" 40 5 8
+  PANRAW="$W/ipanraw.mp4"
+  # A hard horizontal pan: unambiguously above the threshold, not marginally so.
+  ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=s=320x240:r=15:d=6" \
+    -frames:v "$(frame_count "$PANSRC")" \
+    -vf "crop=160:120:min(iw-160\,n*14):40,scale=64:36" \
+    -c:v libx264 -crf 18 -pix_fmt yuv420p "$PANRAW"
+  PANREC="$(python "$REPO/pipeline/rife.py" recommend "$PANRAW" --explain 2>/dev/null)"
+  case "$(printf '%s\n' "$PANREC" | sed -n 1p)" in
+    rife) ok "interp: the fallback fixture does recommend rife ($(printf '%s\n' "$PANREC" | sed -n 2p))" ;;
+    *) bad "interp: the fallback fixture does recommend rife" \
+           "fixture recommends '$(printf '%s\n' "$PANREC" | sed -n 1p)' — it cannot exercise the fallback" ;;
+  esac
+
+  out="$(env INTERP=auto RIFE_HOME="$W/no_rife_here" bash "$REPO/pipeline/finish.sh" \
+    "$PANRAW" I "$PANSRC" "$IOUT" 2>&1)"
+  if [ ! -f "$IOUT/I_lumafix_K5.mp4" ]; then
+    bad "interp: auto falls back to minterpolate when RIFE is absent" \
+        "no deliverable: $(printf '%s' "$out" | tail -1)"
+  else
+    case "$out" in
+      *"auto -> rife"*"cannot run here"*) ok "interp: auto falls back to minterpolate when RIFE is absent" ;;
+      *"auto -> rife"*) bad "interp: auto falls back to minterpolate when RIFE is absent" \
+             "chose rife but printed no fallback warning" ;;
+      *) bad "interp: auto falls back to minterpolate when RIFE is absent" \
+             "never reached the rife branch: $(printf '%s' "$out" | grep -- '-> ' | head -1)" ;;
+    esac
+  fi
+
+  # An unmeasurable render during auto-select must not abort finish.sh. This is the
+  # defect a bare `RECO="$(rife.py recommend ...)"` produced under set -e: motion
+  # measurement failing killed the pipeline AFTER luma-fix, cadence-restore and grading
+  # had already run, instead of falling back to minterpolate. Verified by forcing
+  # `recommend` to fail in a patched COPY of the pipeline directory (rife.py's own guards
+  # already refuse a too-short render cleanly, so triggering the failure through a real
+  # clip would test THOSE guards, not this one) and running the real finish.sh against it
+  # end to end.
+  # Mirrors <repo>/pipeline/, not a flat copy: finish.sh derives REPO from its own
+  # location as "$HERE/.." and then imports timing.py as "$REPO/pipeline/timing" - a flat
+  # copy breaks that assumption and fails before ever reaching the code under test here.
+  PIPECOPY="$W/pipecopy"; rm -rf "$PIPECOPY"; mkdir -p "$PIPECOPY/pipeline"
+  cp "$REPO/pipeline/finish.sh" "$REPO/pipeline/luma_stabilise.py" \
+     "$REPO/pipeline/timing.py" "$REPO/pipeline/grade.py" "$REPO/pipeline/rife.py" \
+     "$REPO/pipeline/selective_interp.py" "$PIPECOPY/pipeline/"
+  python - "$PIPECOPY/pipeline/rife.py" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+old = '    elif cmd == "recommend":\n'
+new = '    elif cmd == "recommend":\n        sys.exit(1)  # TEST INJECTION: force auto-select to see a failure\n'
+assert s.count(old) == 1, f"anchor matched {s.count(old)} times"
+open(p, "w").write(s.replace(old, new))
+PY
+  FSRC="$W/ifail_src.mp4"; FRAW="$W/ifail_raw.mp4"; FOUT="$W/ifail_out"
+  mk_vfr_source "$FSRC" 20 5 8
+  mk_upscaled "$FRAW" "$(frame_count "$FSRC")"
+  rm -rf "$FOUT"; mkdir -p "$FOUT"
+  FOUT_LOG="$(bash "$PIPECOPY/pipeline/finish.sh" "$FRAW" IFAIL "$FSRC" "$FOUT" 2>&1)"; FRC=$?
+  if [ "$FRC" -ne 0 ] || [ ! -f "$FOUT/IFAIL_lumafix_K5.mp4" ]; then
+    bad "interp: an unmeasurable render during auto-select falls back, not aborts" \
+        "exit $FRC: $(printf '%s' "$FOUT_LOG" | tail -2 | head -1)"
+  else
+    case "$FOUT_LOG" in
+      *"could not measure motion"*"Falling back to minterpolate"*)
+        ok "interp: an unmeasurable render during auto-select falls back, not aborts" ;;
+      *) bad "interp: an unmeasurable render during auto-select falls back, not aborts" \
+             "deliverable produced but no fallback message: $(printf '%s' "$FOUT_LOG" | tail -1)" ;;
+    esac
+  fi
+
+  # finish.sh used to read $RECO with stderr MERGED into stdout (`rife_try`'s own 2>&1),
+  # then parse its first line positionally as the decision itself. block_motion() decodes
+  # through OpenCV's ffmpeg backend, which can write straight to the process's real
+  # stderr - bypassing Python entirely - before recommend()'s own print(rec) ever runs;
+  # merged, that line becomes line 1 and INTERP silently becomes the warning text instead
+  # of "rife" or "minterpolate" - which can never accidentally equal "rife", so this always
+  # and only mis-selected minterpolate for footage that measured as needing rife, with no
+  # error at all. Simulated the mechanism directly (a real OpenCV warning was not
+  # reproducible on any fixture tried in this environment) by patching a COPY of rife.py
+  # to write a recognisable line to stderr at the same point in `recommend` that a real
+  # decoder warning would land - before the scan that produces the real answer - and
+  # running the real finish.sh, with the fallback-fixture pan clip already proven above to
+  # measure as rife, end to end.
+  STDERRCOPY="$W/pipecopy_stderr"; rm -rf "$STDERRCOPY"; mkdir -p "$STDERRCOPY/pipeline"
+  cp "$REPO/pipeline/finish.sh" "$REPO/pipeline/luma_stabilise.py" \
+     "$REPO/pipeline/timing.py" "$REPO/pipeline/grade.py" "$REPO/pipeline/rife.py" \
+     "$REPO/pipeline/selective_interp.py" "$STDERRCOPY/pipeline/"
+  python - "$STDERRCOPY/pipeline/rife.py" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+old = '    elif cmd == "recommend":\n'
+new = ('    elif cmd == "recommend":\n'
+       '        print("SPURIOUS_DECODER_WARNING", file=sys.stderr)  # TEST INJECTION\n')
+assert s.count(old) == 1, f"anchor matched {s.count(old)} times"
+open(p, "w").write(s.replace(old, new))
+PY
+  clean_iout
+  SOUT="$(env INTERP=auto RIFE_HOME="$W/no_rife_here" bash "$STDERRCOPY/pipeline/finish.sh" \
+    "$PANRAW" I "$PANSRC" "$IOUT" 2>&1)"
+  case "$SOUT" in
+    *"auto -> rife"*"cannot run here"*)
+      ok "interp: a decoder warning on stderr does not corrupt the auto-selected value" ;;
+    *"SPURIOUS_DECODER_WARNING"*"auto ->"*)
+      bad "interp: a decoder warning on stderr does not corrupt the auto-selected value" \
+          "leaked into the parsed decision: $(printf '%s' "$SOUT" | grep -- 'auto ->' | head -1)" ;;
+    *) bad "interp: a decoder warning on stderr does not corrupt the auto-selected value" \
+           "never reached the rife branch: $(printf '%s' "$SOUT" | grep -- '-> ' | head -1)" ;;
+  esac
+
+  # A safety net independent of the fix above: whatever recommendation() returns, finish.sh
+  # must not assign it to INTERP unquestioned. Simulated by patching a COPY of rife.py so
+  # recommendation() always returns a value that is neither "rife" nor "minterpolate" -
+  # standing in for any future bug in that function, not just the stderr-merge mechanism
+  # above - and confirming finish.sh still produces a deliverable rather than silently
+  # running with a nonsense INTERP or crashing deeper in on an unrecognised value.
+  BOGUSCOPY="$W/pipecopy_bogus"; rm -rf "$BOGUSCOPY"; mkdir -p "$BOGUSCOPY/pipeline"
+  cp "$REPO/pipeline/finish.sh" "$REPO/pipeline/luma_stabilise.py" \
+     "$REPO/pipeline/timing.py" "$REPO/pipeline/grade.py" "$REPO/pipeline/rife.py" \
+     "$REPO/pipeline/selective_interp.py" "$BOGUSCOPY/pipeline/"
+  python - "$BOGUSCOPY/pipeline/rife.py" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+old = '    return "rife" if m > MOTION_THRESHOLD else "minterpolate"\n'
+new = '    return "bogus_value"  # TEST INJECTION: neither valid answer\n'
+assert s.count(old) == 1, f"anchor matched {s.count(old)} times"
+open(p, "w").write(s.replace(old, new))
+PY
+  clean_iout
+  BOUT="$(env INTERP=auto bash "$BOGUSCOPY/pipeline/finish.sh" "$RAW" I "$SRC" "$IOUT" 2>&1)"; BRC=$?
+  if [ "$BRC" -ne 0 ] || [ ! -f "$IOUT/I_lumafix_K5.mp4" ]; then
+    bad "interp: an unrecognised auto-selection value falls back, not aborts" \
+        "exit $BRC: $(printf '%s' "$BOUT" | tail -2 | head -1)"
+  else
+    case "$BOUT" in
+      *"unexpected auto-selection output"*"Falling back to minterpolate"*)
+        ok "interp: an unrecognised auto-selection value falls back, not aborts" ;;
+      *) bad "interp: an unrecognised auto-selection value falls back, not aborts" \
+             "deliverable produced but no fallback message: $(printf '%s' "$BOUT" | tail -1)" ;;
+    esac
+  fi
+
+  # A run that fails AFTER grading but BEFORE the 60fps stages used to have already moved
+  # the fresh 14fps pair into OUT_DIR (grading publishes as soon as it verifies, well
+  # before interpolation or the selective pass even start) - so a re-run of an existing TAG
+  # that failed partway left a fresh 14fps pair sitting next to a STALE K5 from the
+  # previous successful run: three files present, none missing, no error visible in
+  # OUT_DIR - a mismatched deliverable set that looked exactly like a complete one.
+  # Reproduced directly: run finish.sh to completion once, capture every deliverable's
+  # mtime, then force a failure in a patched COPY of the pipeline (selective_interp.py
+  # exits immediately, well after grading has published) and confirm every deliverable's
+  # mtime is unchanged - nothing was touched by the run that failed.
+  clean_iout
+  ATOM_OUT1="$(env INTERP=minterpolate bash "$REPO/pipeline/finish.sh" "$RAW" ATOM "$SRC" "$IOUT" 2>&1)"; ATOM_RC1=$?
+  if [ "$ATOM_RC1" -ne 0 ] || [ ! -f "$IOUT/ATOM_lumafix_K5.mp4" ]; then
+    bad "interp: a failed re-run does not touch any already-published deliverable" \
+        "first (successful) run failed: exit $ATOM_RC1: $(printf '%s' "$ATOM_OUT1" | tail -1)"
+  else
+    M14_BEFORE="$(stat -c %Y "$IOUT/ATOM_lumafix_14fps.mp4")"
+    MUN_BEFORE="$(stat -c %Y "$IOUT/ATOM_lumafix_14fps_ungraded.mp4")"
+    MK5_BEFORE="$(stat -c %Y "$IOUT/ATOM_lumafix_K5.mp4")"
+    sleep 1.1  # comfortably past filesystem mtime granularity
+
+    SELCOPY="$W/pipecopy_sel_fail"; rm -rf "$SELCOPY"; mkdir -p "$SELCOPY/pipeline"
+    cp "$REPO/pipeline/finish.sh" "$REPO/pipeline/luma_stabilise.py" \
+       "$REPO/pipeline/timing.py" "$REPO/pipeline/grade.py" "$REPO/pipeline/rife.py" \
+       "$REPO/pipeline/selective_interp.py" "$SELCOPY/pipeline/"
+    python - "$SELCOPY/pipeline/selective_interp.py" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+old = 'INTERP, SOURCE, PTSFILE, OUT = sys.argv[1:5]\n'
+new = old + 'sys.exit(1)  # TEST INJECTION: force the selective pass to fail\n'
+assert s.count(old) == 1, f"anchor matched {s.count(old)} times"
+open(p, "w").write(s.replace(old, new))
+PY
+    ATOM_OUT2="$(env INTERP=minterpolate bash "$SELCOPY/pipeline/finish.sh" "$RAW" ATOM "$SRC" "$IOUT" 2>&1)"; ATOM_RC2=$?
+    if [ "$ATOM_RC2" -eq 0 ]; then
+      bad "interp: a failed re-run does not touch any already-published deliverable" \
+          "the injected failure did not actually fail the run"
+    else
+      M14_AFTER="$(stat -c %Y "$IOUT/ATOM_lumafix_14fps.mp4")"
+      MUN_AFTER="$(stat -c %Y "$IOUT/ATOM_lumafix_14fps_ungraded.mp4")"
+      MK5_AFTER="$(stat -c %Y "$IOUT/ATOM_lumafix_K5.mp4")"
+      if [ "$M14_BEFORE" = "$M14_AFTER" ] && [ "$MUN_BEFORE" = "$MUN_AFTER" ] \
+         && [ "$MK5_BEFORE" = "$MK5_AFTER" ]; then
+        ok "interp: a failed re-run does not touch any already-published deliverable"
+      else
+        bad "interp: a failed re-run does not touch any already-published deliverable" \
+            "a deliverable's mtime changed despite the run failing (14fps $M14_BEFORE->$M14_AFTER, ungraded $MUN_BEFORE->$MUN_AFTER, K5 $MK5_BEFORE->$MK5_AFTER)"
+      fi
+    fi
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # The cloud runner, driven against stubs. Separate file because it fakes an entire
 # environment; run from here so it is not forgotten.
 # ---------------------------------------------------------------------------

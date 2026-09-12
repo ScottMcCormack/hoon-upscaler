@@ -89,6 +89,21 @@ computed where the effect should not appear — catches most of it.
 - **Disable rotation in stabilisation** (`maxangle=0`). Handheld shake is nearly all
   translation; rotation fitting chases noise and produces a swimming picture.
 - **No `unsharp` in the grade.** It rings on high-contrast lettering.
+- **Match the interpolator to the motion.** On a fast pan ~8% of the frame width is newly
+  revealed each frame, with no correspondence in the previous frame, so `minterpolate`'s
+  block compensation stretches neighbours into it and the picture flows rather than moves.
+  The search window is a ruled-out hypothesis, not the cause — at `search_param` 250, zero
+  frames were beyond range and the output was still glassy. Block motion is selected on as
+  a *proxy* for fast panning: fine at 3.36% of frame width (N90), glassy at 9.95%
+  (MVI_0081), measured on the actual `_lumafix_14fps.mp4` render `finish.sh` thresholds
+  (the raw source reads close but not identical), both a windowed max over the full
+  clip - a single clip-wide percentile let a real pan under ~5% of a clip's length hide
+  below the threshold entirely. Measured as a FRACTION, because block motion in pixels
+  scales with resolution and an absolute threshold judged the same footage differently
+  at 720p and
+  1080p. `finish.sh` picks by measurement;
+  RIFE handles the fast case. Neither fixes baked-in motion blur, which is a reason to
+  drop the output frame rate rather than to change interpolator.
 - **Never grade with a fixed contrast pivot.** `eq=contrast` expands around 128, so its
   effect depends on where the clip sits. The one hardcoded grade clipped 51.8% of a
   daylight clip to white and crushed 3.5% of a night clip to black. Turning it down does

@@ -39,8 +39,9 @@ Steps 5-8 are automated by `pipeline/finish.sh`.
 Step 8 picks its interpolator by measurement. On a fast pan, newly revealed content has no
 correspondence in the previous frame, so `minterpolate`'s block compensation stretches
 neighbours into it and the picture flows rather than moves — fine on near-static footage
-(2.96% of frame width, windowed block motion), visibly wrong on a clip that pans (11.65%).
-Raising the search range does not help — the search window is a ruled-out hypothesis, not
+(3.27% of frame width, windowed block motion, measured on the actual render `finish.sh`
+thresholds), visibly wrong on a clip that pans (9.95%). Raising the search range does not
+help — the search window is a ruled-out hypothesis, not
 the cause; block motion is used as a proxy because it tracks the real mechanism, fast
 panning, without measuring it directly. RIFE synthesises those regions instead.
 `INTERP=minterpolate|rife|auto`

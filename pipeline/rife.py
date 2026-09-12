@@ -80,15 +80,18 @@ import sys
 # different answer, decided by the output size rather than by the motion. This pipeline
 # renders at 720p or 1080p, so that was reachable, not theoretical.
 #
-# 6% sits between the two clips that calibrated it, measured on the full clips with the
-# windowed statistic block_motion now uses (a single clip-wide p95 let a real, severe
-# pan hide below the threshold whenever it was under ~5% of the clip's total length -
-# see block_motion's docstring):
-#     N90 clip (minterpolate fine)    2.96% windowed max, full 1480-frame clip
-#     MVI_0081 (glassy)              11.65% windowed max, full 852-frame clip
-# A 3.9x gap, wider than the un-windowed statistic's (1.94% to 5.58%, a 2.9x gap) gave -
-# windowing raises the floor for a clip that is MOSTLY calm with brief fast passages,
-# which is what MVI_0081 partly is, more than it raises a clip with sustained panning.
+# 6% sits between the two clips that calibrated it, measured on the actual
+# `_lumafix_14fps.mp4` renders finish.sh passes to recommend() - not the raw source,
+# which reads close but not identical (see the module docstring) - with the windowed
+# statistic block_motion now uses (a single clip-wide p95 let a real, severe pan hide
+# below the threshold whenever it was under ~5% of the clip's total length - see
+# block_motion's docstring):
+#     N90 clip (minterpolate fine)    3.27% windowed max, full 1556-frame render
+#     MVI_0081 (glassy)               9.95% windowed max, full 852-frame render
+# A 3.0x gap, wider than the un-windowed statistic's on the same renders (2.12% to
+# 5.28%, a 2.5x gap) - windowing raises the floor for a clip that is MOSTLY calm with
+# brief fast passages, which is what MVI_0081 partly is, more than it raises a clip
+# with sustained panning.
 MOTION_THRESHOLD = 0.06
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -287,6 +290,12 @@ def interpolate(src, dst, target_fps=60.0, scale=1.0):
     # instead of the caller's - which surfaced as an ffprobe CalledProcessError naming a
     # file that plainly exists, pointing nowhere near the actual problem.
     src, dst = os.path.abspath(src), os.path.abspath(dst)
+    # Written under a temp name and moved into place only after the frame count is
+    # verified, not opened directly on dst - a model exception, a decoder failure, or a
+    # short count would otherwise leave a plausible partial file at the path a caller is
+    # about to publish, which is exactly the failure the count check two lines below
+    # exists to catch, just one step too late.
+    dst_tmp = dst + ".partial"
     sys.path.insert(0, RIFE_REPO)
     os.chdir(RIFE_REPO)
     from train_log.RIFE_HDv3 import Model
@@ -328,7 +337,7 @@ def interpolate(src, dst, target_fps=60.0, scale=1.0):
     wr = subprocess.Popen(["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt",
                            "rgb24", "-s", f"{w}x{h}", "-r", f"{target_fps:g}", "-i", "-",
                            "-c:v", "libx264", "-preset", "veryfast", "-crf", "0", "-pix_fmt",
-                           "yuv420p", dst], stdin=subprocess.PIPE)
+                           "yuv420p", dst_tmp], stdin=subprocess.PIPE)
     fsz = w * h * 3
 
     def read():
@@ -348,7 +357,7 @@ def interpolate(src, dst, target_fps=60.0, scale=1.0):
                            .permute(1, 2, 0).cpu().numpy().tobytes())
         except BrokenPipeError:
             raise SystemExit(
-                f"!! writing {dst} failed: the encoder exited while frames were still "
+                f"!! writing {dst_tmp} failed: the encoder exited while frames were still "
                 f"being sent (ffmpeg's own error is above). Usually an unwritable path, "
                 f"a full disk, or no encoder for the requested format.")
 
@@ -402,13 +411,14 @@ def interpolate(src, dst, target_fps=60.0, scale=1.0):
         raise SystemExit(f"!! reading {src} failed (ffmpeg exit {rd_rc}) - "
                          f"unreadable input, or no decoder for it")
     if wr_rc != 0:
-        raise SystemExit(f"!! writing {dst} failed (ffmpeg exit {wr_rc}) - "
+        raise SystemExit(f"!! writing {dst_tmp} failed (ffmpeg exit {wr_rc}) - "
                          f"no encoder, no space, or an unwritable path")
 
-    got = probe(dst)[3]
+    got = probe(dst_tmp)[3]
     # A truncated interpolation still plays; only the frame count gives it away.
     if got != n_out:
         raise SystemExit(f"!! wrote {got} frames, expected {n_out}")
+    os.replace(dst_tmp, dst)
     print(f"    {got} frames")
 
 
@@ -428,6 +438,13 @@ def main():
     if len(sys.argv) < 2 or (len(sys.argv) < 3 and sys.argv[1] != "why"):
         raise SystemExit(__doc__)
     cmd = sys.argv[1]
+    # Reject extra arguments rather than silently ignoring them - the same convention
+    # cloud/run_on_pod.sh already enforces. Without this, `recommend video --explan` (a
+    # typo) ran to completion with no explanation and no complaint, and a stray extra
+    # argument to `interpolate` still launched the (expensive) model.
+    max_argc = {"measure": 3, "recommend": 4, "why": 2, "interpolate": 6}.get(cmd)
+    if max_argc is not None and len(sys.argv) > max_argc:
+        raise SystemExit(f"!! unexpected extra argument(s) to '{cmd}': {sys.argv[max_argc:]}")
     if cmd == "measure":
         m = block_motion(sys.argv[2])
         rec = recommendation(m)
@@ -441,7 +458,9 @@ def main():
         # pay for a second pass over the clip - which is now the WHOLE clip, making the
         # saving larger than when this was written against a 400-frame cap. Same shape as
         # grade.py --both.
-        if len(sys.argv) > 3 and sys.argv[3] == "--explain":
+        if len(sys.argv) > 3:
+            if sys.argv[3] != "--explain":
+                raise SystemExit(f"!! unknown option '{sys.argv[3]}', expected --explain")
             print(f"block motion (windowed max): {100*m:.2f}% of width, "
                   f"threshold {100*MOTION_THRESHOLD:.1f}%")
     elif cmd == "why":

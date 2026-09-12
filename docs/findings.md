@@ -36,6 +36,7 @@ one without listing it here fails the suite.
 - [An independent high-effort review found ten more, all in code no round had touched, 2026-09-11](#an-independent-high-effort-review-found-ten-more-all-in-code-no-round-had-touched-2026-09-11)
 - [CI failed twice on a test that passed locally both times, 2026-09-11](#ci-failed-twice-on-a-test-that-passed-locally-both-times-2026-09-11)
 - [`git checkout` on a file with real uncommitted work silently discarded it, 2026-09-11](#git-checkout-on-a-file-with-real-uncommitted-work-silently-discarded-it-2026-09-11)
+- [A second review round found six more, mostly the source-vs-render mixup repeating, 2026-09-11](#a-second-review-round-found-six-more-mostly-the-source-vs-render-mixup-repeating-2026-09-11)
 
 **Grading**
 
@@ -1399,3 +1400,77 @@ that assumption and the test failed before ever reaching the code under test, wi
 unrelated `ModuleNotFoundError`. Mirroring the real `pipeline/` subdirectory fixed it.
 Diagnosed by running the exact scenario by hand outside the suite rather than guessing
 from the truncated failure message the harness prints.
+
+## A second review round found six more, mostly the source-vs-render mixup repeating, 2026-09-11
+
+**An explicitly empty `RIFE_HOME` resolved two different ways.** `os.environ.get("RIFE_HOME",
+default)` only substitutes the default when the key is *absent* - `RIFE_HOME=""` resolved to
+`abspath("")`, the interpreter's own cwd, while `finish.sh` reads the same variable as
+`${RIFE_HOME:-default}`, which treats an empty value as unset. The probe and `interpolate()`
+would then run against two different installations for the same environment variable.
+Reproduced directly before fixing: `RIFE_HOME="" python -c "...os.environ.get(...)"` printed
+the test's own cwd, not the default path. Fixed with `or` instead of the dict-get default,
+which falls back on any falsy value the way bash's `:-` does.
+
+**The calibration numbers drifted back to the raw source in three places that were not
+touched when the render-vs-source finding above landed.** `CLAUDE.md`, `README.md`, and
+`pipeline/rife.py`'s own `MOTION_THRESHOLD` comment all still read 2.96%/11.65% - the source
+figures - while the module docstring twelve lines above that same comment already carried
+the corrected 3.27%/9.95% render figures. The fix landing in one place and not its three
+siblings is the exact "standard applied once is not applied" pattern from `CLAUDE.md`.
+Re-measured directly against the actual calibration renders rather than trusting either set
+of numbers: `work/final/Final_lumafix_14fps.mp4` gives 3.271% (matches the docstring) and
+`out/MVI0081_720_lumafix_14fps.mp4` gives 9.953% (matches). The frame count quoted alongside
+it was also wrong in a related way - "1480-frame clip" is the SOURCE's frame count (and
+matches every other reference to 1480 in this repo, all of which are genuinely
+source-based), not the render's; cadence-restore duplicates held frames, and the actual
+calibration render measures 1556. Recomputed the un-windowed-vs-windowed gap on the same
+basis for consistency (2.5x vs 3.0x on the renders, not the stale 2.9x vs 3.9x the old
+comment carried from source-based numbers) rather than leaving one half of the sentence
+correct and the other stale.
+
+**`INTERP` was validated, and a forced-but-unavailable RIFE was refused, only after
+luma-fix, cadence-restore and grading had already run and both 14fps deliverables had
+already been moved into `OUT_DIR`.** A typo'd `INTERP=bogus` paid for the whole expensive
+part of the run before saying so; re-running an existing `TAG` with a bad `RIFE_HOME` left
+a stale 60fps deliverable sitting next to freshly-replaced 14fps ones, an output set that
+looked current but wasn't. Moved both checks to immediately after venv activation, before
+any stage runs - the case-statement validation is free, and the forced-rife availability
+probe (`rife.py why`) never depended on the render anyway, only on the venv/model files on
+disk. This left the later re-probe-and-refuse block genuinely unreachable (by construction,
+not by accident: every path that can still set `INTERP=rife` downstream already guarantees
+`RIFE_OK=0` before it does), so it was simplified to a comment stating the invariant instead
+of kept as dead error-handling. Mutation-tested the property that actually matters - not
+just that the refusal still happens, but that it happens before any output is written: with
+the checks moved back to their original spot, a fixture asserting `I_lumafix_14fps.mp4`
+does not exist after the refusal fails; with the checks at the top, it passes.
+
+**`rife.py`'s CLI silently accepted extra arguments everywhere except nowhere.**
+`cloud/run_on_pod.sh` has always rejected them (`[ "$#" -le 2 ] || { ... exit 1; }`), but
+`rife.py`'s `main()` only checked a *minimum* argument count per command, so `recommend
+video --explan` (a typo) ran to completion with no explanation and no complaint, and an
+extra trailing argument to `interpolate` would still have launched the model. Added a
+per-command maximum arity check and made a malformed option after `recommend`'s video
+argument an error rather than silent no-op. Mutation-tested: reverting either check makes
+the new "extra argument" and "mistyped --explain" tests fail.
+
+**`interpolate()` opened the caller's final output path directly, before the frame-count
+check that exists to catch a truncated result.** A model exception, decoder failure, or
+short count could leave a plausible partial file sitting at the exact path a caller is
+about to treat as a finished deliverable - checked whether this actually threatens the
+pipeline before fixing it as reported: `finish.sh` only ever calls `interpolate()` with a
+work-directory scratch path (`$W/i60_raw.mp4`), not a published one, so the severity Copilot
+described does not reach the real pipeline today. Fixed anyway, since a direct CLI caller is
+still exposed and the fix is cheap: write to `dst + ".partial"`, verify the count, then
+`os.replace()` into the real `dst` only on success. Not covered by an automated test - like
+the rest of `interpolate()`'s internals, exercising it needs a CUDA torch and model weights
+this repo does not vendor, which is the same documented scope boundary the rest of the test
+suite already respects.
+
+**Declined: smoke-loading the actual model weights in the availability probe.** The probe
+confirms a CUDA kernel launches but never loads `flownet.pkl` or imports the real model
+class with it, so a zero-byte or incompatible weight file would still report "available"
+and only fail once `interpolate()` is already running. A real fix needs the actual
+`Model()`/`load_model()` call this environment cannot exercise (no GPU, no vendored
+weights - the same boundary the project has stated throughout for this file). Left as a
+named gap rather than guessed at.

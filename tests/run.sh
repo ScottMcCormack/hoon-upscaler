@@ -668,6 +668,20 @@ print('yes' if rife.available() else 'no')"
   assert_eq "interp: a fast-panning clip picks rife" \
     "rife" "$(python "$R" recommend "$W/panning.mp4" 2>/dev/null)"
 
+  # Extra CLI arguments must be refused, not silently ignored - the same convention
+  # cloud/run_on_pod.sh already enforces. Without this, a typo'd --explain ran to
+  # completion with no explanation and no complaint, and a stray extra argument to
+  # interpolate would still launch the model.
+  assert_stderr_matches "interp: a mistyped --explain is refused, not silently ignored" \
+    "unknown option '--explan'" \
+    python "$R" recommend "$W/static.mp4" --explan
+  assert_stderr_matches "interp: an extra argument to 'why' is refused" \
+    "unexpected extra argument" \
+    python "$R" why extra_garbage
+  assert_stderr_matches "interp: an extra argument to 'measure' is refused" \
+    "unexpected extra argument" \
+    python "$R" measure "$W/static.mp4" extra_garbage
+
   # An unknown INTERP must not fall through to a default the caller did not ask for.
   SRC="$W/isrc.mp4"; RAW="$W/iraw.mp4"; IOUT="$W/iout"; mkdir -p "$IOUT"
   mk_vfr_source "$SRC" 40 5 8
@@ -676,11 +690,33 @@ print('yes' if rife.available() else 'no')"
   clean_iout; assert_stderr_matches "interp: an unknown INTERP is refused" "unknown INTERP" \
     env INTERP=bogus bash "$REPO/pipeline/finish.sh" "$RAW" I "$SRC" "$IOUT"
 
+  # Refused before any work runs, not after it - a typo'd INTERP must not pay for luma-fix,
+  # cadence-restore and grading first. Reproduced the old behaviour before fixing it: with
+  # validation left at its original spot (after grading, before interpolation), this same
+  # scenario left I_lumafix_14fps.mp4 sitting in IOUT despite the nonzero exit.
+  if [ -f "$IOUT/I_lumafix_14fps.mp4" ]; then
+    bad "interp: an unknown INTERP is refused before any stage runs" \
+        "I_lumafix_14fps.mp4 exists - grading (and everything before it) ran first"
+  else
+    ok "interp: an unknown INTERP is refused before any stage runs"
+  fi
+
   # Forcing rife when it is not installed must refuse, not quietly produce the output the
   # caller explicitly asked not to have.
   clean_iout; assert_stderr_matches "interp: forced rife without a setup is refused" \
     "RIFE cannot run here" \
     env INTERP=rife RIFE_HOME="$W/no-such-rife" bash "$REPO/pipeline/finish.sh" "$RAW" I "$SRC" "$IOUT"
+
+  # Same property, forced-RIFE side: a re-run of an existing TAG with a bad RIFE_HOME must
+  # not leave a stale 60fps deliverable beside freshly-replaced 14fps ones. Reproduced: with
+  # the availability probe left at its original spot, this refusal happened AFTER both
+  # 14fps files were already moved into IOUT.
+  if [ -f "$IOUT/I_lumafix_14fps.mp4" ]; then
+    bad "interp: forced rife without a setup is refused before any stage runs" \
+        "I_lumafix_14fps.mp4 exists - grading (and everything before it) ran first"
+  else
+    ok "interp: forced rife without a setup is refused before any stage runs"
+  fi
 
   # The recommendation must not depend on output size. Block motion in pixels scales with
   # resolution, so a 60px threshold judged the SAME footage "minterpolate" at width 440 and

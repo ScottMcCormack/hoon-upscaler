@@ -55,6 +55,53 @@ if [ -f "$REPO/.venv/bin/activate" ]; then
   source "$REPO/.venv/bin/activate"
 fi
 
+# Which interpolator. On a fast pan, roughly 8% of the frame width is newly revealed each
+# frame and has no correspondence in the previous one, so minterpolate's block compensation
+# stretches neighbours into it and the picture flows rather than moves. RIFE synthesises
+# those regions instead. The search window was the hypothesis this replaced and is ruled
+# out - at search 250, zero frames were beyond range and the output was still glassy - so
+# block motion is selected on as a PROXY for fast panning, not as the cause.
+#
+# auto measures and picks. minterpolate stays the default where it works, since RIFE needs
+# a CUDA torch and a model that this repo does not vendor.
+#
+# Validated HERE, before any of the expensive stages below run, not after them. An
+# unknown INTERP or an unavailable forced RIFE used to be refused only after luma-fix,
+# cadence-restore and grading had all completed and both 14fps deliverables had already
+# been moved into OUT_DIR - which paid the full cost of a run for a typo'd INTERP before
+# saying so, and on a re-run of an existing TAG left a stale 60fps deliverable sitting next
+# to freshly replaced 14fps ones: an inconsistent output set that still looked current.
+INTERP="${INTERP:-auto}"
+case "$INTERP" in
+  auto|minterpolate|rife) ;;
+  *) echo "!! unknown INTERP '$INTERP' - expected auto, minterpolate or rife" >&2; exit 1 ;;
+esac
+# The invocation is shared; the exit-code capture at each call site cannot be, and
+# trying to make it a shared out-parameter was itself a bug once already: `X="$(rife_try
+# ...)"` runs rife_try in a SUBSHELL (every command substitution does), so an
+# out-parameter it sets is invisible to the caller once that subshell exits. The
+# function's own EXIT STATUS - which mirrors python's, since that is its last command -
+# survives the subshell boundary the normal way, via $? read immediately after the
+# assignment. What every call site still needs is `&& OK=0 || OK=$?`, not a bare
+# assignment: a bare one is how "RIFE cannot run here" turned into "finish.sh aborted
+# after luma-fix, cadence-restore and grading had already run" rather than falling back to
+# minterpolate, and that happened TWICE on this branch - once when RECO was first added
+# unguarded, and again when an unrelated edit reintroduced the same bare form afterward.
+rife_try() { python "$HERE/rife.py" "$@" 2>&1; }
+
+if [ "$INTERP" = "rife" ]; then
+  # Forced, not auto-selected: refuse rather than silently producing the output the
+  # caller explicitly asked not to have. Probed here, before any of the expensive stages
+  # below run or touch OUT_DIR - see the comment above.
+  RIFE_WHY="$(rife_try why)" && RIFE_OK=0 || RIFE_OK=$?
+  if [ "$RIFE_OK" -ne 0 ]; then
+    echo "!! INTERP=rife but RIFE cannot run here: $RIFE_WHY" >&2
+    echo "   Expected a venv and the v4.25 model under ${RIFE_HOME:-$REPO/work/rife}," >&2
+    echo "   with a torch build whose kernels match this GPU - see pipeline/rife.py." >&2
+    exit 1
+  fi
+fi
+
 echo "### $TAG  <- $(basename "$RAW")  $(date +%T)"
 ffprobe -v error -select_streams v:0 -show_entries stream=width,height,nb_frames \
   -of csv=p=0 "$RAW"
@@ -192,33 +239,6 @@ SRC_SPAN=$(cat "$W/span.txt")
 EXPECT60=$(python -c "print(round($SRC_SPAN * 60))")
 echo "    target $EXPECT60 frames (video spans ${SRC_SPAN}s)"
 
-# Which interpolator. On a fast pan, roughly 8% of the frame width is newly revealed each
-# frame and has no correspondence in the previous one, so minterpolate's block compensation
-# stretches neighbours into it and the picture flows rather than moves. RIFE synthesises
-# those regions instead. The search window was the hypothesis this replaced and is ruled
-# out - at search 250, zero frames were beyond range and the output was still glassy - so
-# block motion is selected on as a PROXY for fast panning, not as the cause.
-#
-# auto measures and picks. minterpolate stays the default where it works, since RIFE needs
-# a CUDA torch and a model that this repo does not vendor.
-INTERP="${INTERP:-auto}"
-case "$INTERP" in
-  auto|minterpolate|rife) ;;
-  *) echo "!! unknown INTERP '$INTERP' - expected auto, minterpolate or rife" >&2; exit 1 ;;
-esac
-# The invocation is shared; the exit-code capture at each call site cannot be, and
-# trying to make it a shared out-parameter was itself a bug once already: `X="$(rife_try
-# ...)"` runs rife_try in a SUBSHELL (every command substitution does), so an
-# out-parameter it sets is invisible to the caller once that subshell exits. The
-# function's own EXIT STATUS - which mirrors python's, since that is its last command -
-# survives the subshell boundary the normal way, via $? read immediately after the
-# assignment. What every call site still needs is `&& OK=0 || OK=$?`, not a bare
-# assignment: a bare one is how "RIFE cannot run here" turned into "finish.sh aborted
-# after luma-fix, cadence-restore and grading had already run" rather than falling back to
-# minterpolate, and that happened TWICE on this branch - once when RECO was first added
-# unguarded, and again when an unrelated edit reintroduced the same bare form afterward.
-rife_try() { python "$HERE/rife.py" "$@" 2>&1; }
-
 if [ "$INTERP" = "auto" ]; then
   # One call, not two. block_motion scans the whole clip through OpenCV by default (see
   # pipeline/rife.py), and asking separately for the recommendation and the number
@@ -248,18 +268,11 @@ fi
 # Interpolate from the GRADED render — the selective pass pulls held frames from it, and
 # mixing graded with ungraded puts a ~10-17 luma step at every hold boundary.
 if [ "$INTERP" = "rife" ]; then
-  # Forced, not auto-selected: refuse rather than silently producing the output the
-  # caller explicitly asked not to have.
-  # Reuse the auto path's answer when it already probed; otherwise ask now.
-  if [ -z "${RIFE_OK:-}" ]; then
-    RIFE_WHY="$(rife_try why)" && RIFE_OK=0 || RIFE_OK=$?
-  fi
-  if [ "$RIFE_OK" -ne 0 ]; then
-    echo "!! INTERP=rife but RIFE cannot run here: $RIFE_WHY" >&2
-    echo "   Expected a venv and the v4.25 model under ${RIFE_HOME:-$REPO/work/rife}," >&2
-    echo "   with a torch build whose kernels match this GPU - see pipeline/rife.py." >&2
-    exit 1
-  fi
+  # No re-probe here, deliberately. INTERP can only be "rife" at this point one of two
+  # ways: forced by the caller, in which case the top-of-script check already probed and
+  # would have exited before any of the work above ran; or chosen by the auto block just
+  # above, which only leaves INTERP set to "rife" after probing it there itself. Either
+  # way RIFE_OK is already "0" - there is no route to this branch with it unset or failed.
   RIFE_PY="${RIFE_HOME:-$REPO/work/rife}/venv/bin/python"
   # No fallback to the system python. It would run RIFE against whatever torch happens to
   # be on PATH - or none - and report the confusing failure from deep inside the model
@@ -290,9 +303,13 @@ fi
 # steps in one filter). Sharing this means a future change to stop=8, or to crf, cannot
 # land in one branch and not its twin the way two independently-spelled-out ffmpeg
 # commands invited.
-# RIFE emits (n-1)*4+1: there is nothing past the last source frame to interpolate into.
+# RIFE's own schedule stops at the last source instant: there is nothing past it to
+# interpolate into. That was `(n-1)*4+1` only for the 15->60fps case this pipeline used
+# to be fixed to; output_schedule() now derives a different count for each of the other
+# source rates it supports (24, 25, 30, 14.75fps), so no single formula belongs here.
 # Clone a few frames so the filter chain has somewhere to run to, then trim to the count
-# the SOURCE timestamps imply rather than to whatever the render happened to produce.
+# the SOURCE timestamps imply (EXPECT60) rather than to whatever the render happened to
+# produce.
 ffmpeg -y -v error -i "$I60_SRC" \
   -vf "tpad=stop=8:stop_mode=clone,${I60_FILTER},trim=end_frame=$EXPECT60,setpts=PTS-STARTPTS" \
   -c:v libx264 -preset fast -crf 12 -an "$W/i60.mp4"

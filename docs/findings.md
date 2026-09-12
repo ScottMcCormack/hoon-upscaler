@@ -51,6 +51,10 @@ one without listing it here fails the suite.
 - [A merged stderr stream could silently corrupt the auto-selected interpolator, 2026-09-12](#a-merged-stderr-stream-could-silently-corrupt-the-auto-selected-interpolator-2026-09-12)
 - [A run that failed after grading could leave a fresh 14fps pair beside a stale K5, 2026-09-12](#a-run-that-failed-after-grading-could-leave-a-fresh-14fps-pair-beside-a-stale-k5-2026-09-12)
 
+**A second source**
+
+- [A second source, 2026-09-05 — where the recipe held and where it did not](#a-second-source-2026-09-05--where-the-recipe-held-and-where-it-did-not)
+
 **Grading**
 
 - [The grade was clipping half the picture, 2026-09-06](#the-grade-was-clipping-half-the-picture-2026-09-06)
@@ -69,11 +73,14 @@ one without listing it here fails the suite.
 - [The tests that guarded the manifest could not read it, 2026-09-06](#the-tests-that-guarded-the-manifest-could-not-read-it-2026-09-06)
 - [The fix for an asymmetry was itself asymmetric, 2026-09-07](#the-fix-for-an-asymmetry-was-itself-asymmetric-2026-09-07)
 - [Round three, part two: the same fix missing from a fourth file, twice](#round-three-part-two-the-same-fix-missing-from-a-fourth-file-twice)
+- [A clean auto-merge produced a script that refused its own feature, 2026-09-07](#a-clean-auto-merge-produced-a-script-that-refused-its-own-feature-2026-09-07)
 - [Copilot on the grade: two real defects and one half-right, 2026-09-07](#copilot-on-the-grade-two-real-defects-and-one-half-right-2026-09-07)
 - [Two adversarial reviews of the grade change, 2026-09-07](#two-adversarial-reviews-of-the-grade-change-2026-09-07)
 - [Failing loudly is not the same as failing safely, 2026-09-08](#failing-loudly-is-not-the-same-as-failing-safely-2026-09-08)
 - [Scanning every frame did not close the hole it was supposed to, 2026-09-08](#scanning-every-frame-did-not-close-the-hole-it-was-supposed-to-2026-09-08)
 - [Reviewing my own work found what the reviewers had already fixed, 2026-09-08](#reviewing-my-own-work-found-what-the-reviewers-had-already-fixed-2026-09-08)
+- [The empty-argument guard reached two of three positionals, 2026-09-12](#the-empty-argument-guard-reached-two-of-three-positionals-2026-09-12)
+- [A third recurrence retired the hardcoded line number instead of re-verifying it again, 2026-09-12](#a-third-recurrence-retired-the-hardcoded-line-number-instead-of-re-verifying-it-again-2026-09-12)
 
 ## Pre-filters — roughly twenty variants, all unnecessary in the end
 
@@ -1998,3 +2005,196 @@ grading, writing K5 straight to `OUT_DIR`, and dropping the tail publish-togethe
 reproduces the exact failure the new test was built to catch - the 14fps pair's mtimes
 change on the failed re-run while K5's does not - and no other test in the suite is
 affected by the revert. Full suite (141) passes with the fix in place.
+
+## A second source, 2026-09-05 — where the recipe held and where it did not
+
+`input/MVI_0081.avi`, the first footage this pipeline has been pointed at that is not the
+2007 N90 clip. It was assumed to be the same camera. It is not, and the differences that
+mattered were not the ones the specs suggested.
+
+```
+                    21042007052.mp4 (N90)      MVI_0081.avi (Canon)
+container/codec     mp4 / mpeg4                AVI / MJPEG, intra-only
+resolution          352x288 (CIF)              320x240 (4:3, square px)
+video bitrate       509 kbps                   1449 kbps  (~3.8x per pixel)
+pixel format        yuv420p, pc range          yuvj422p, pc range
+timing              15fps VFR, with stalls     15fps CFR, 851/851 gaps at 66.666ms
+length              1480 frames / 103.7s       852 frames / 56.8s
+audio               AAC 16kHz mono             PCM u8 11.024kHz mono
+metadata            -                          software=CanonMVI01, 2006-05-21 11:09:40
+```
+
+**The timing machinery needed no changes.** `timing.base_rate` returns 15 with worst-case
+error 0.00001 of a frame (limit 0.02), 0 frames held, span 56.799432s. No gap exceeds the
+selective pass's 150ms threshold, so that pass degrades to plain 60fps interpolation. This
+is the stall-free CFR case already unit-tested above, now confirmed on real footage.
+`mpdecimate` drops 2 of 852 frames, so the constant timestamps reflect genuine constant
+motion rather than a camera padding its output.
+
+### Stabiliser smoothing has to match the camera's motion
+
+The N90 clip is near-static handheld. This one is a tracking shot: phase correlation over
+all 852 frames gives mean inter-frame displacement 6.44px and a **cumulative horizontal
+range of 1365px across a 320px-wide frame** — more than four frame-widths of deliberate pan.
+
+A wide smoothing window treats that pan as something to remove, and pays for it in border
+fill. Measured on the 20-30s segment, the fastest pan in the clip:
+
+```
+smoothing   worst border intrusion   mean black area   residual shake (9-frame)
+   10                  8px                0.06%              1.25 px/frame
+   30                 61px                3.90%              1.18 px/frame
+   60                154px               17.60%              1.25 px/frame
+   source              -                     -               2.32 px/frame
+```
+
+Smoothing 10 already recovers all the available shake reduction; 30 and 60 buy nothing and
+consume up to half the frame. The README's documented `smoothing=20` was not itself in this
+table — it was described by extrapolation between the 10 and 30 rows, which is not the same
+as measuring it. Measured directly, same segment, an equivalent script (values are not
+directly comparable to the table above; the metric is analogous, not identical):
+
+```
+smoothing   worst border intrusion   mean black area   residual shake (9-frame)
+   10                   3px                0.01%              0.44 px/frame
+   20                  24px                0.67%              0.49 px/frame
+   30                  52px                3.45%              0.57 px/frame
+   60                 143px               14.07%              0.55 px/frame
+```
+
+Same shape as the first measurement: shake reduction saturates at 10 (0.44 -> 0.49 at 20 is
+noise, not improvement) while border cost keeps climbing (3px -> 24px, 8x). 20 is not "far
+too wide" the way 30 and 60 are — it is a real, moderate cost bought for zero shake benefit
+over 10, which is the actual, now-measured case for not using it. Across the full clip at
+smoothing 10, worst intrusion is 11px on 15 of 852 frames, which a 12px crop margin absorbs.
+
+The rule is not "use 10". It is that the window must be shorter than the camera's intended
+movement, and the cost of getting it wrong is measurable before any GPU is rented.
+
+### The luma step is aimed at hunting, and this camera drifts instead
+
+`luma_stabilise.py` exists to remove the N90's auto-exposure oscillation. Whether a clip
+oscillates is objective — count direction changes in per-frame mean luma:
+
+```
+                 YAVG mean   stdev   direction flips
+N90 clip           133.9      4.2     715/1479 = 48.3%   -> oscillating (hunting)
+MVI_0081           217.9     26.5     161/851  = 18.9%   -> monotonic runs (drift)
+```
+
+The drift is the operator panning off a blown sky onto shaded ground over the closing six
+seconds, 231 -> 117 mean Y. Direction-flip counting can only distinguish oscillation from a
+trend - it cannot on its own say the trend is the camera's exposure adjusting rather than
+the scene itself getting darker as the frame fills with ground instead of sky, and a pan
+like this one is the more direct explanation. Either way it is scene content, not the
+metering hunt `luma_stabilise.py` targets, and a 61-frame rolling normalisation would
+flatten it regardless of which cause is right. Untested against a render so far; the call
+belongs to the eye, on a visual comparison of the finish pass with and without the step.
+
+This is the same shape as the pre-filter finding: a step that is correct for one source is
+not thereby correct for the next, and the cheap check is whether the defect it targets is
+actually present.
+
+### The subject is small, which bounds what the upscale can honestly claim
+
+YOLO11m over all 852 frames finds a vehicle in 87% of them. Median width **42px**, mean 57px,
+p90 133px, reaching 301px only in the closing seconds as the car approaches.
+
+At the ratios this pipeline uses, a 42px car is not resolved, it is invented — the whole
+subject, not just lettering on a sign. The closing frames additionally carry readable text
+(`AUTOWORX` on the door), which is exactly the case that produced a confident wrong phone
+number on the N90 clip. Both are reasons to look at 720 before paying for 1080, and reasons
+the output term of use in CONTRIBUTING.md applies with more force here, not less.
+
+### Framing
+
+Crop `296:168:12:44` from the stabilised 320x240. The 12px side margin absorbs the worst
+measured border intrusion; the y offset of 44 discards the top rows, which sit at mean Y
+251-253 and are clipped white. The car falls entirely inside for 97.3% of detected frames and
+overlaps for 99.6% — the shortfall is the closing approach, where the car is larger than the
+crop, which is intended. AR 1.762, close to the original deliverable's 312x176 (1.773).
+
+## A clean auto-merge produced a script that refused its own feature, 2026-09-07
+
+Rebasing the second-clip branch onto main after PR #5 merged, `cloud/run_on_pod.sh`
+auto-merged with no conflict. The result was broken:
+
+```
+line 33:  [ "$#" -le 2 ] || { echo "!! unexpected extra argument(s)"; exit 1; }
+line 56:  CLIP="${3:-}"
+```
+
+PR #5 added the argument-count guard when two positional arguments was the whole
+interface. The second-clip branch added `CLIP` as a third. Both edits are correct against
+the base they were written on, they touch different lines, and git merged them happily.
+Every named-clip invocation would have been refused by a guard added to prevent typos.
+
+Two conflicts in the same rebase *did* raise markers, both trivially resolvable — the ones
+git flagged were additive text in `docs/findings.md` and `tests/cloud_pod.sh`, while the one
+that mattered went through silently. Conflict markers mark textual overlap, not
+contradiction.
+
+The test suite did not catch it either, and could not have: `tests/cloud_pod.sh` came from
+the branch and never invoked more than two arguments on the main side, while main's
+`guard: extra arguments are refused` case passed `720 test --dry-run` — which after the
+merge is not an extra argument at all, but a clip named `--dry-run`. That test kept
+passing for the wrong reason, refusing on a missing input rather than on argument count.
+It now passes four arguments.
+
+The rule this earns: **after any auto-merge, re-read the merged region of a file whose
+interface either side changed.** Not the diff — the merged result. A diff shows each side's
+change as reasonable; only the combined file shows they contradict. The cheap check is to
+run the feature each branch added, since a passing suite proves only that the tests that
+existed still pass.
+
+## The empty-argument guard reached two of three positionals, 2026-09-12
+
+**`CLIP` never got the guard `RES` and `MODE` already had.** An explicitly empty argument -
+a wrapper passing through a variable it never set - is different from an omitted one, and
+both `RES`'s and `MODE`'s guards already refuse the explicit-empty case rather than silently
+substituting a default (`docs/findings.md`, "The fix for an asymmetry was itself
+asymmetric"). `CLIP="${3:-}"` never got the same treatment: `CLIP` was added as a third
+positional after that guard shape already existed for the first two, and it was never
+carried over. Reproduced directly before fixing: `run_on_pod.sh 720 test ""` ran to
+completion against the legacy, unnamespaced input and output paths with no complaint at
+all - exactly the "second source overwrites the first's master and its manifest" failure
+naming a clip exists to prevent, and the third recurrence of the same class of bug this
+file has now recorded for this script (the RES/MODE asymmetry above; the fourth-file miss
+in "Round three, part two"; this). Fixed with the same guard shape used for `RES` and
+`MODE`. Mutation-tested: reverting the added guard fails the new regression case and only
+that case.
+
+**`--help`'s own output-name documentation had the same gap the code did.** The no-CLIP
+Output section named only `sr_out_<res>.mp4`, the full-mode name - omitting that test mode,
+the invocation `--help` itself recommends running first, writes `sr_test_<res>.mp4`
+instead. A caller following that advice would not know which file to look for. Fixed the
+doc, and - since the docstring grew by two lines - re-verified `--help`'s own hardcoded
+`sed -n '2,23p'` range against the new line count rather than assuming it still covered the
+usage block: it now needs `2,25p`. This exact range has already cut usage lines off once
+before ("A clean auto-merge produced a script that refused its own feature," a few entries
+above) when the docstring grew and the range was not updated to match. Pinned this time
+with a test that checks for the LAST usage line specifically, not just the presence of
+`test_15s.mp4` - the previous `--help` test would not have caught a truncated range, since
+it only checked content the range still included either way.
+
+Both mutation-tested independently by reverting each fix and confirming only its own test
+failed. 45 tests pass (was 43).
+
+## A third recurrence retired the hardcoded line number instead of re-verifying it again, 2026-09-12
+
+**The `--help` line range was fixed to two line numbers, and this is the third time that
+has been the actual defect - twice as the bug, once (above) as the fix that only re-pinned
+it rather than removing it.** Follow-up review pointed out that `2,25p` is exactly as
+fragile as `2,20p` and `2,23p` were: correct today, silently wrong the next time a line is
+added or removed from the docstring above it, with nothing to notice. The test added above
+would have caught the NEXT instance of the old failure mode, but not prevented it -
+catching a regression after the fact is not the same as removing the class of regression.
+
+**Fixed by selecting through the closing `# ====` separator instead of a line number:**
+`sed -n '2,/^# ====/{/^# ====/!p}'` finds the range's own end at read time, so it moves on
+its own when the docstring changes shape - there is no number left to fall out of sync.
+Verified directly rather than assumed: a new test builds a patched copy of the script with
+an extra usage line inserted just before the closing separator (standing in for a real
+future docstring edit, without waiting for one to actually happen) and confirms `--help`
+still shows it, with no accompanying change to the selection logic itself. Mutation-tested:
+reverting to the fixed-range form fails exactly this new test and no other.

@@ -2,31 +2,44 @@
 # ============================================================================
 # SeedVR2 upscale - RunPod / cloud GPU
 #
-# Input : full_169.mp4  312x176, 1480 frames  (~104s, the whole clip)
-#         test_15s.mp4  312x176, 214 frames   (~15s, for a cheap first run)
-#         Both are already stabilised and cropped to 16:9, with no pre-filter.
-#         Neither is in the repo - they are media. Make them from the stabilised
-#         source (see README "Prepare the source"), then upload both to this
+# Input : with no CLIP argument, the original N90 clip -
+#           full_169.mp4  312x176, 1480 frames  (~104s, the whole clip)
+#           test_15s.mp4  312x176, 214 frames   (~15s, for a cheap first run)
+#         with a CLIP argument, <CLIP>_full.mp4 and <CLIP>_test.mp4.
+#         All are already stabilised and cropped to 16:9, with no pre-filter.
+#         None are in the repo - they are media. Make them from the stabilised
+#         source (see README "Prepare the source"), then upload to this
 #         directory on the pod:
 #           ffmpeg -i stabilised.mp4 -vf "crop=312:176:0:0" -crf 0 full_169.mp4
 #           ffmpeg -i full_169.mp4 -frames:v 214 -c copy   test_15s.mp4
 #
-# Output: sr_out_<res>.mp4 - upscaled only. Timing restore, grade and the
-#         selective 60fps pass are done locally afterwards.
+# Output: with no CLIP, sr_test_<res>.mp4 (test mode) or sr_out_<res>.mp4 (full mode) -
+#         the two differ, so the test-first invocation below writes sr_test_<res>.mp4,
+#         not sr_out_<res>.mp4. With a CLIP argument, sr_<CLIP>_<mode>_<res>.mp4 either
+#         way. All of these are upscaled only - timing restore, grade and the selective
+#         60fps pass are done locally afterwards.
 #
-# Usage:  bash run_on_pod.sh 720            # full clip at 720
-#         bash run_on_pod.sh 720 test       # 15s test first - DO THIS ONE FIRST
-#         bash run_on_pod.sh 1080           # if 720 looks good and you're curious
+# Usage:  bash run_on_pod.sh 720                    # full clip at 720
+#         bash run_on_pod.sh 720 test               # 15s test first - DO THIS ONE FIRST
+#         bash run_on_pod.sh 1080                   # if 720 looks good and you're curious
+#         bash run_on_pod.sh 720 test mvi0081       # a second source, namespaced
 # ============================================================================
 set -euo pipefail
 case "${1:-}" in
   -h|--help)
-    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+    # Selected through the closing "# ====" separator rather than a hardcoded line
+    # number, so the range moves on its own when the docstring above it grows or shrinks.
+    # A fixed endpoint has already cut usage lines off twice before (it stopped at 20,
+    # then at 23, each time one edit behind the docstring above it) - review caught both,
+    # but a range that cannot go stale is better than one re-verified by hand each time.
+    sed -n '2,/^# ====/{/^# ====/!p}' "$0" | sed 's/^# \{0,1\}//'
     exit 0 ;;
 esac
 # Reject extra arguments rather than ignoring them: a mistyped invocation should say so,
-# not quietly run something adjacent to what was meant.
-[ "$#" -le 2 ] || { echo "!! unexpected extra argument(s): ${*:3}"; exit 1; }
+# not quietly run something adjacent to what was meant. The ceiling is 3 because CLIP is
+# a real third argument; it was 2 before CLIP existed, and git merged the two changes
+# without noticing they contradict - the guard would have refused every clip invocation.
+[ "$#" -le 3 ] || { echo "!! unexpected extra argument(s): ${*:4}"; exit 1; }
 # Omitting the resolution means 720. An explicitly EMPTY one is a wrapper passing through
 # a variable it never set, and ${1:-720} cannot tell the two apart — the same hole the
 # mode guard below closes. Left open it is worse than the mode case, because a lone empty
@@ -49,17 +62,42 @@ if [ "$#" -ge 2 ] && [ -z "$2" ]; then
   echo "!! mode was given but empty. Pass 'test' or 'full' explicitly."; exit 1
 fi
 MODE="${2:-full}"
+# Same hole as RES and MODE above, on the third positional: omitting CLIP means the
+# legacy, unnamespaced clip (documented below), but an explicitly EMPTY one is a wrapper
+# passing through a variable it never set - and the unguarded `${3:-}` could not tell the
+# two apart. Left open, that silently takes the legacy branch: a second source's render
+# and manifest overwrite the first's, which is exactly what naming a clip exists to
+# prevent - the "standard applied once is not applied" case CLAUDE.md warns about,
+# happening here because CLIP was added as a third positional after this guard shape was
+# already established for the other two and never carried over to it.
+if [ "$#" -ge 3 ] && [ -z "$3" ]; then
+  echo "!! clip was given but empty. Pass a clip name explicitly, or omit the argument entirely."; exit 1
+fi
+CLIP="${3:-}"
 case "$MODE" in
   test|full) ;;
   *) echo "!! unknown mode '$MODE' - expected 'test' or 'full'. Refusing to guess, since"
      echo "   the wrong guess is the chargeable full render."; exit 1 ;;
 esac
+# CLIP is interpolated into the filenames below. Empty is the legacy default and fine;
+# anything that could escape this directory is not.
+case "$CLIP" in
+  */*|*\\*|.|..|*..*) echo "!! invalid clip '$CLIP': no path separators or .. allowed"; exit 1 ;;
+esac
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
-if [ "$MODE" = "test" ]; then
-  IN="$HERE/test_15s.mp4";  OUT="$HERE/sr_test_${RES}.mp4"
+# Omitting CLIP reproduces the original invocation byte-for-byte, so the recorded 720p
+# master still replays. Naming a clip namespaces input AND output: without that, a second
+# source silently overwrites the first's master and its manifest, and the manifest is the
+# only record of how that master was made.
+if [ -z "$CLIP" ]; then
+  if [ "$MODE" = "test" ]; then
+    IN="$HERE/test_15s.mp4";  OUT="$HERE/sr_test_${RES}.mp4"
+  else
+    IN="$HERE/full_169.mp4";  OUT="$HERE/sr_out_${RES}.mp4"
+  fi
 else
-  IN="$HERE/full_169.mp4";  OUT="$HERE/sr_out_${RES}.mp4"
+  IN="$HERE/${CLIP}_${MODE}.mp4";  OUT="$HERE/sr_${CLIP}_${MODE}_${RES}.mp4"
 fi
 [ -f "$IN" ] || { echo "ERROR: $IN not found - upload it to this directory first"; exit 1; }
 

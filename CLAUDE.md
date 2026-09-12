@@ -88,6 +88,18 @@ computed where the effect should not appear — catches most of it.
   out of frame solved it and removed the need for any pre-filter at all.
 - **Disable rotation in stabilisation** (`maxangle=0`). Handheld shake is nearly all
   translation; rotation fitting chases noise and produces a swimming picture.
+- **Match the stabiliser's smoothing window to the camera's motion.** `smoothing=20` suits
+  the near-static N90 clip. On a tracking shot that pans 1365px across a 320px frame, 10 is
+  right and 30 drags black 61px into the picture while removing no more shake. Measure
+  border intrusion and residual shake on one segment first — both are objective.
+- **Check the defect a step targets is actually present.** `luma_stabilise.py` removes
+  auto-exposure *hunting*: oscillation, measured as direction changes in per-frame mean
+  luma (N90: 48.3% flips). The Canon clip's luma instead falls monotonically (18.9% flips)
+  while the operator pans from a blown sky onto shaded ground — a real scene-brightness
+  change that a rolling normalisation would flatten. Direction-flip counting distinguishes
+  oscillation from a trend; it cannot by itself say the trend is camera exposure rather
+  than scene content, and here the framing makes scene content the more direct read. The
+  call — flatten or not — still belongs to the eye, on a rendered comparison.
 - **No `unsharp` in the grade.** It rings on high-contrast lettering.
 - **Match the interpolator to the motion.** On a fast pan ~8% of the frame width is newly
   revealed each frame, with no correspondence in the previous frame, so `minterpolate`'s

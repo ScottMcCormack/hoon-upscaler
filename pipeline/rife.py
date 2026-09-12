@@ -627,14 +627,25 @@ def main():
         if len(sys.argv) < 4:
             raise SystemExit(
                 "usage: rife.py interpolate <in> <out> [target_fps] [scale] [--no-audio]")
-        with_audio = True
-        if len(sys.argv) > 6:
-            if sys.argv[6] != "--no-audio":
-                raise SystemExit(f"!! unknown option '{sys.argv[6]}', expected --no-audio")
-            with_audio = False
+        # --no-audio is a FLAG, not a positional argument fixed to argv[6] - the usage
+        # line advertises target_fps and scale as independently optional, so
+        # `interpolate in out --no-audio` (skipping both) has to work, not just
+        # `interpolate in out 60 1.0 --no-audio` (giving both first). Found by
+        # reproduction: the fixed-position version raised a raw ValueError from
+        # float("--no-audio") for exactly that shorter, equally valid form. Removed from
+        # wherever it appears among the trailing args, then whatever remains is read
+        # positionally as [target_fps] [scale].
+        rest = sys.argv[4:]
+        with_audio = "--no-audio" not in rest
+        rest = [a for a in rest if a != "--no-audio"]
+        bad_flags = [a for a in rest if a.startswith("--")]
+        if bad_flags:
+            raise SystemExit(f"!! unknown option '{bad_flags[0]}', expected --no-audio")
+        if len(rest) > 2:
+            raise SystemExit(f"!! unexpected extra argument(s) to 'interpolate': {rest[2:]}")
         interpolate(sys.argv[2], sys.argv[3],
-                    float(sys.argv[4]) if len(sys.argv) > 4 else 60.0,
-                    float(sys.argv[5]) if len(sys.argv) > 5 else 1.0,
+                    float(rest[0]) if len(rest) > 0 else 60.0,
+                    float(rest[1]) if len(rest) > 1 else 1.0,
                     with_audio=with_audio)
     else:
         raise SystemExit(f"unknown command '{cmd}'")

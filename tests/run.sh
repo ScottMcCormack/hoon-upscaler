@@ -693,11 +693,23 @@ print('yes' if rife.available() else 'no')"
   # check. The guard runs before any model import, so this needs no real input file to
   # stay CUDA-independent: it never gets far enough to open one.
   assert_stderr_matches "interp: a mistyped --no-audio is refused, not silently ignored" \
-    "unknown option 'extra_garbage', expected --no-audio" \
-    python "$R" interpolate nonexistent_src.mp4 nonexistent_dst.mp4 60 1.0 extra_garbage
+    "unknown option '--explain', expected --no-audio" \
+    python "$R" interpolate nonexistent_src.mp4 nonexistent_dst.mp4 60 1.0 --explain
   assert_stderr_matches "interp: an extra argument to 'interpolate' is refused" \
     "unexpected extra argument" \
-    python "$R" interpolate nonexistent_src.mp4 nonexistent_dst.mp4 60 1.0 --no-audio extra_garbage
+    python "$R" interpolate nonexistent_src.mp4 nonexistent_dst.mp4 60 1.0 extra_garbage
+  # --no-audio is a FLAG, not fixed to one position - target_fps and scale are each
+  # independently optional per the usage line, so skipping either or both must not break
+  # the flag. Reproduced first: the fixed-argv[6] version raised a raw ValueError from
+  # float("--no-audio") for `interpolate in out --no-audio` (both optionals skipped).
+  # Missing input files make every form below fail identically further in - at the
+  # ffprobe stage, not the argument parse - which is exactly what proves parsing itself
+  # accepted all four shapes.
+  for form in "--no-audio" "60 --no-audio" "--no-audio 60" "60 1.0 --no-audio"; do
+    assert_stderr_matches "interp: --no-audio parses in any position (args: $form)" \
+      "could not read video info" \
+      python "$R" interpolate nonexistent_src.mp4 nonexistent_dst.mp4 $form
+  done
 
   # An unknown INTERP must not fall through to a default the caller did not ask for.
   SRC="$W/isrc.mp4"; RAW="$W/iraw.mp4"; IOUT="$W/iout"; mkdir -p "$IOUT"

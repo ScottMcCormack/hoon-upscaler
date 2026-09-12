@@ -45,6 +45,7 @@ one without listing it here fails the suite.
 - [A packet count is not a frame count, and a container can refuse a codec outright, 2026-09-12](#a-packet-count-is-not-a-frame-count-and-a-container-can-refuse-a-codec-outright-2026-09-12)
 - [My own audio fix cost the pipeline a redundant remux, and could delete a finished render, 2026-09-12](#my-own-audio-fix-cost-the-pipeline-a-redundant-remux-and-could-delete-a-finished-render-2026-09-12)
 - [The stride grid's blind spot was never only at the tail, 2026-09-12](#the-stride-grids-blind-spot-was-never-only-at-the-tail-2026-09-12)
+- [A flag fixed to one argv position broke the shorter form its own usage line advertised, 2026-09-12](#a-flag-fixed-to-one-argv-position-broke-the-shorter-form-its-own-usage-line-advertised-2026-09-12)
 
 **Grading**
 
@@ -1789,3 +1790,33 @@ itself did not need to move - 6% still sits comfortably between both figures - b
 comment, module docstring, `CLAUDE.md`, and `README.md` all still cited the old 3.27%,
 and were updated to the re-measured 3.36% rather than left to drift, the way earlier
 rounds' calibration numbers were found to have done.
+
+## A flag fixed to one argv position broke the shorter form its own usage line advertised, 2026-09-12
+
+**The `--no-audio` CLI flag added in the previous round only worked at exactly `argv[6]`,
+but the usage line it shipped with (`interpolate <in> <out> [target_fps] [scale]
+[--no-audio]`) advertises `target_fps` and `scale` as independently optional.** Reproduced
+directly: `rife.py interpolate in.mp4 out.mp4 --no-audio` (skipping both optional numbers,
+exactly as `[target_fps] [scale]` says is allowed) tried `float("--no-audio")` and crashed
+with a raw `ValueError`, not any of the clean messages this pipeline's other guards are
+tested against. A flag whose position depends on how many of the OTHER optional arguments
+happened to be given is not really optional at a fixed position at all.
+
+**Fixed by treating `--no-audio` as a flag to be found and removed from wherever it
+appears among the trailing arguments, not a value read from one fixed slot.** Whatever
+remains after removing it is then read positionally as `[target_fps] [scale]`, in that
+order, regardless of where the flag was. A leftover argument starting with `--` that isn't
+`--no-audio` is still a clean "unknown option" error, and more than two leftover positional
+arguments is still a clean "unexpected extra argument(s)" error - both existing guards,
+just re-derived against the new parsing instead of assuming a fixed position. One existing
+test needed correcting rather than just re-passing: it had asserted a non-flag 5th argument
+("`extra_garbage`") produced "unknown option", which was really testing the OLD
+fixed-position bug's specific failure shape, not the guard it claimed to. Under the
+corrected parsing that input is genuinely "too many positional arguments", a different and
+equally valid guard, so the test was rewritten to use an actual `--`-prefixed wrong flag
+instead. Four new cases cover the flag at every position that matters - alone, after
+`target_fps` alone, before both, and after both - and all four fail identically further in
+(a missing-file error, not a parse error), which is what proves parsing itself accepted all
+four shapes. Mutation-tested: reverting to the fixed-position form fails three of the four
+new cases (the fourth, `--no-audio` already last, was the only shape the old code ever got
+right) and none of the others.

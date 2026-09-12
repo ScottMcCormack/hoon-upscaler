@@ -1820,3 +1820,18 @@ instead. Four new cases cover the flag at every position that matters - alone, a
 four shapes. Mutation-tested: reverting to the fixed-position form fails three of the four
 new cases (the fourth, `--no-audio` already last, was the only shape the old code ever got
 right) and none of the others.
+
+**The four new tests for that fix passed locally and failed on the real CI runner** -
+`ModuleNotFoundError: No module named 'torch'`, not the "could not read video info"
+message they expected. `interpolate()` imported `torch` unconditionally at its very top,
+before ever calling `probe(src)` - a missing/unreadable source file used to be masked
+entirely by a torch import failing first, on any machine without one installed. This
+repo's own test scope statement ("model execution is deliberately out of scope for the
+suite - it needs a CUDA torch...") already implies CI has no torch at all, which is
+exactly what surfaced this: torch is installed locally (CPU build), so the tests never
+saw the problem until the real runner did. Fixed by moving `probe(src)` (and the pure
+schedule math that only needs its result) before the `torch`/model imports, so a bad
+source path fails with `probe()`'s own message regardless of whether torch is installed -
+confirmed by simulating a missing `torch` locally (a fake `__import__` that raises
+`ModuleNotFoundError` for it) and checking `interpolate()` still fails cleanly on a
+nonexistent source rather than surfacing the import error.

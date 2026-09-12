@@ -354,9 +354,6 @@ def available():
 
 
 def interpolate(src, dst, target_fps=60.0, scale=1.0, with_audio=True):
-    import numpy as np
-    import torch
-
     tmp = pad_to(scale)
     # Resolve BEFORE the chdir below. Practical-RIFE must be imported from its own
     # directory, and after chdir a relative src/dst resolves against that directory
@@ -376,10 +373,11 @@ def interpolate(src, dst, target_fps=60.0, scale=1.0, with_audio=True):
     # frame. Splitting first keeps a real, recognised video extension on the temp file.
     root, ext = os.path.splitext(dst)
     dst_tmp = f"{root}.partial{ext}"
-    sys.path.insert(0, RIFE_REPO)
-    os.chdir(RIFE_REPO)
-    from train_log.RIFE_HDv3 import Model
 
+    # Probed before torch or the model are imported - a missing or unreadable src is a
+    # cheap, common mistake that should fail with probe()'s own clean message, not pay
+    # for (and on a box with no torch installed at all, be masked entirely by) a torch
+    # import first.
     w, h, fps, n = probe(src)
     ph = ((h - 1) // tmp + 1) * tmp
     pw = ((w - 1) // tmp + 1) * tmp
@@ -391,6 +389,12 @@ def interpolate(src, dst, target_fps=60.0, scale=1.0, with_audio=True):
     # Uniform container timestamps hid it; the motion itself juddered.
     sched = output_schedule(n, fps, target_fps)
     n_out = len(sched)
+
+    import numpy as np
+    import torch
+    sys.path.insert(0, RIFE_REPO)
+    os.chdir(RIFE_REPO)
+    from train_log.RIFE_HDv3 import Model
     print(f"    {w}x{h} @ {fps:g}fps, {n} frames -> {target_fps:g}fps, "
           f"{n_out} frames (pad {pw}x{ph}, scale {scale})")
 

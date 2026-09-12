@@ -43,6 +43,7 @@ one without listing it here fails the suite.
 - [A downsampling request would close the decoder's pipe before it finished writing, 2026-09-12](#a-downsampling-request-would-close-the-decoders-pipe-before-it-finished-writing-2026-09-12)
 - [The standalone interpolation CLI silently dropped every audio track, 2026-09-12](#the-standalone-interpolation-cli-silently-dropped-every-audio-track-2026-09-12)
 - [A packet count is not a frame count, and a container can refuse a codec outright, 2026-09-12](#a-packet-count-is-not-a-frame-count-and-a-container-can-refuse-a-codec-outright-2026-09-12)
+- [My own audio fix cost the pipeline a redundant remux, and could delete a finished render, 2026-09-12](#my-own-audio-fix-cost-the-pipeline-a-redundant-remux-and-could-delete-a-finished-render-2026-09-12)
 
 **Grading**
 
@@ -1719,3 +1720,31 @@ exercised for real, not just reasoned about. Three fixtures: a source with no au
 passes through untouched), a source with AAC audio (stream-copied, codec unchanged), and a
 source with `pcm_u8` audio (falls back to AAC). Mutation-tested: removing the AAC retry
 fails exactly the third case and none of the others.
+
+## My own audio fix cost the pipeline a redundant remux, and could delete a finished render, 2026-09-12
+
+**The previous round's audio fix made `interpolate()` always call `publish_with_audio()`,
+without noticing that `finish.sh`'s own call site immediately discards whatever audio it
+attaches.** `finish.sh` feeds the graded 14fps render (which already has AAC audio) into
+`interpolate()`, then re-encodes the result with `-an` a few lines later. Every real RIFE
+run in the pipeline was therefore stream-copying its entire large, lossless RGB intermediate
+into a second temp file solely to attach a track nobody downstream reads - doubling peak
+disk use and I/O for nothing. Fixed by adding a `with_audio` parameter to `interpolate()`
+(default `True`, matching the documented standalone CLI's behaviour) and a `--no-audio` CLI
+flag, which `finish.sh` now passes explicitly, with a comment stating why.
+
+**The same review caught a second bug in the same function, more serious than the first:
+`publish_with_audio()` deleted the completed video BEFORE checking whether the mux it was
+about to replace it with had actually succeeded.** If both the stream-copy and the AAC
+retry fail - a full disk, a muxer that refuses AAC too - the function deleted the only
+existing copy of an otherwise-complete interpolation and then raised, discarding real
+(in the model-backed path, expensive) work for a failure the caller might otherwise have
+been able to recover from. Fixed by moving the deletion to after the success check, and
+naming the preserved path in the error message so a caller knows where to find it.
+Mutation-tested with a fixture that forces both mux attempts to fail (`dst` pointed at a
+nonexistent directory): reverting the fix fails this test, and only this test.
+
+Both findings live in `publish_with_audio()`, which the previous round had already pulled
+out of `interpolate()` specifically because it needs no CUDA torch or model to reach -
+that decision is what let both of these be caught with real fixtures instead of only
+reasoned about, the same as the round that introduced the function.

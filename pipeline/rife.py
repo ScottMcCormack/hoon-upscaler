@@ -57,7 +57,14 @@ Point RIFE_HOME elsewhere if you put it somewhere else.
   rife.py measure <video>                         report motion and the recommendation
   rife.py recommend <video> [--explain]           the recommendation, optionally with why
   rife.py why                                     whether RIFE can run here, and if not why
-  rife.py interpolate <in> <out> [target_fps] [scale]   interpolate to a target rate
+  rife.py interpolate <in> <out> [target_fps] [scale] [--no-audio]
+                                                         interpolate to a target rate.
+                                                         <in>'s audio is muxed into <out>
+                                                         by default (re-encoded to AAC if
+                                                         the container refuses a straight
+                                                         copy) - pass --no-audio to skip
+                                                         that, e.g. when a caller re-encodes
+                                                         <out> itself and drops audio anyway.
                                                          <in> MUST be constant frame rate -
                                                          output_schedule() assumes uniform
                                                          spacing from probe()'s nominal fps
@@ -333,7 +340,7 @@ def available():
     return unavailable_reason() is None
 
 
-def interpolate(src, dst, target_fps=60.0, scale=1.0):
+def interpolate(src, dst, target_fps=60.0, scale=1.0, with_audio=True):
     import numpy as np
     import torch
 
@@ -486,7 +493,15 @@ def interpolate(src, dst, target_fps=60.0, scale=1.0):
     # A truncated interpolation still plays; only the frame count gives it away.
     if got != n_out:
         raise SystemExit(f"!! wrote {got} frames, expected {n_out}")
-    publish_with_audio(dst_tmp, src, dst)
+    if with_audio:
+        publish_with_audio(dst_tmp, src, dst)
+    else:
+        # finish.sh's own next step re-encodes with -an, discarding audio outright, so
+        # muxing it in here would stream-copy this whole (large, lossless) intermediate
+        # to a second temp file purely to attach a track nobody downstream reads -
+        # doubling peak disk use and I/O for nothing. with_audio=True stays the default
+        # for the documented standalone CLI, which has no such downstream step.
+        os.replace(dst_tmp, dst)
     print(f"    {got} frames")
 
 
@@ -532,10 +547,16 @@ def publish_with_audio(video_tmp, src, dst):
             ["ffmpeg", "-v", "error", "-y", "-i", video_tmp, "-i", src,
              "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy",
              "-c:a", "aac", "-b:a", "128k", dst_tmp2]).returncode
-    os.remove(video_tmp)
+    # video_tmp is kept until the mux is confirmed to have succeeded, not deleted
+    # unconditionally beforehand - if both attempts fail (a full disk, a muxer that also
+    # refuses AAC), that file is the only copy of an otherwise-complete interpolation,
+    # and this is the last point at which it still exists to be recovered.
     if mux_rc != 0:
-        raise SystemExit(f"!! muxing audio from {src} into {dst} failed "
-                         f"(ffmpeg exit {mux_rc}), even after transcoding to AAC")
+        raise SystemExit(
+            f"!! muxing audio from {src} into {dst} failed (ffmpeg exit {mux_rc}), "
+            f"even after transcoding to AAC. The completed video-only interpolation is "
+            f"preserved at {video_tmp} - move it into place manually, or retry.")
+    os.remove(video_tmp)
     os.replace(dst_tmp2, dst)
 
 
@@ -559,7 +580,7 @@ def main():
     # cloud/run_on_pod.sh already enforces. Without this, `recommend video --explan` (a
     # typo) ran to completion with no explanation and no complaint, and a stray extra
     # argument to `interpolate` still launched the (expensive) model.
-    max_argc = {"measure": 3, "recommend": 4, "why": 2, "interpolate": 6}.get(cmd)
+    max_argc = {"measure": 3, "recommend": 4, "why": 2, "interpolate": 7}.get(cmd)
     if max_argc is not None and len(sys.argv) > max_argc:
         raise SystemExit(f"!! unexpected extra argument(s) to '{cmd}': {sys.argv[max_argc:]}")
     if cmd == "measure":
@@ -590,10 +611,17 @@ def main():
         sys.exit(0 if why is None else 1)
     elif cmd == "interpolate":
         if len(sys.argv) < 4:
-            raise SystemExit("usage: rife.py interpolate <in> <out> [target_fps] [scale]")
+            raise SystemExit(
+                "usage: rife.py interpolate <in> <out> [target_fps] [scale] [--no-audio]")
+        with_audio = True
+        if len(sys.argv) > 6:
+            if sys.argv[6] != "--no-audio":
+                raise SystemExit(f"!! unknown option '{sys.argv[6]}', expected --no-audio")
+            with_audio = False
         interpolate(sys.argv[2], sys.argv[3],
                     float(sys.argv[4]) if len(sys.argv) > 4 else 60.0,
-                    float(sys.argv[5]) if len(sys.argv) > 5 else 1.0)
+                    float(sys.argv[5]) if len(sys.argv) > 5 else 1.0,
+                    with_audio=with_audio)
     else:
         raise SystemExit(f"unknown command '{cmd}'")
 

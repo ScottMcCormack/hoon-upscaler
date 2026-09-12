@@ -692,9 +692,12 @@ print('yes' if rife.available() else 'no')"
   # the case that used to reach the (expensive) model instead of stopping at the arity
   # check. The guard runs before any model import, so this needs no real input file to
   # stay CUDA-independent: it never gets far enough to open one.
+  assert_stderr_matches "interp: a mistyped --no-audio is refused, not silently ignored" \
+    "unknown option 'extra_garbage', expected --no-audio" \
+    python "$R" interpolate nonexistent_src.mp4 nonexistent_dst.mp4 60 1.0 extra_garbage
   assert_stderr_matches "interp: an extra argument to 'interpolate' is refused" \
     "unexpected extra argument" \
-    python "$R" interpolate nonexistent_src.mp4 nonexistent_dst.mp4 60 1.0 extra_garbage
+    python "$R" interpolate nonexistent_src.mp4 nonexistent_dst.mp4 60 1.0 --no-audio extra_garbage
 
   # An unknown INTERP must not fall through to a default the caller did not ask for.
   SRC="$W/isrc.mp4"; RAW="$W/iraw.mp4"; IOUT="$W/iout"; mkdir -p "$IOUT"
@@ -903,6 +906,26 @@ rife.publish_with_audio('$W/pub_pcm.mp4', '$PCM_SRC', '$W/pub_pcm_out.mp4')
   else
     bad "interp: publish_with_audio falls back to AAC when the source codec cannot be stream-copied" \
         "$PUB_PCM_LOG"
+  fi
+
+  # If BOTH mux attempts fail, the completed video-only interpolation must survive, not
+  # be deleted before the failure is even reported - that file is the only copy of an
+  # otherwise-complete (in the real caller, expensive) render. Forced by pointing dst at
+  # a directory that does not exist, so writing dst_tmp2 fails regardless of audio codec.
+  cp "$AUDIOVID" "$W/pub_bothfail.mp4"
+  PUB_BOTHFAIL_LOG="$(python -c "
+import sys; sys.path.insert(0, '$REPO/pipeline')
+import rife
+rife.publish_with_audio('$W/pub_bothfail.mp4', '$AAC_SRC', '$W/no_such_dir/out.mp4')
+" 2>&1)"; PUB_BOTHFAIL_RC=$?
+  if [ "$PUB_BOTHFAIL_RC" -eq 0 ]; then
+    bad "interp: publish_with_audio preserves the video when both mux attempts fail" \
+        "expected a nonzero exit, got 0"
+  elif [ ! -f "$W/pub_bothfail.mp4" ]; then
+    bad "interp: publish_with_audio preserves the video when both mux attempts fail" \
+        "video_tmp was deleted despite both mux attempts failing: $PUB_BOTHFAIL_LOG"
+  else
+    ok "interp: publish_with_audio preserves the video when both mux attempts fail"
   fi
 
   # Motion after the first 400 frames must still count. The old default measured only the

@@ -285,8 +285,11 @@ if [ "$INTERP" = "rife" ]; then
   # `fps=60` on that advances the picture in a mix of 1/72 and 2/72 steps, repeating some
   # frames outright. The container timestamps looked uniform either way, which is why the
   # frame-count and duration checks did not notice.
+  # --no-audio: the tail below re-encodes with -an regardless, so muxing the graded
+  # render's audio in here would stream-copy this whole (large, lossless) intermediate to
+  # a second temp file purely to attach a track that gets discarded one step later.
   "$RIFE_PY" "$HERE/rife.py" interpolate \
-    "$OUT_DIR/${TAG}_lumafix_14fps.mp4" "$W/i60_raw.mp4" 60 1.0
+    "$OUT_DIR/${TAG}_lumafix_14fps.mp4" "$W/i60_raw.mp4" 60 1.0 --no-audio
   I60_SRC="$W/i60_raw.mp4"
   # fps=60 is now a no-op - RIFE emits at exactly 60 - and is kept as a belt-and-braces
   # assertion of the contract rather than as the fix it briefly was. If the interpolator

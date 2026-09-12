@@ -48,6 +48,8 @@ one without listing it here fails the suite.
 - [A flag fixed to one argv position broke the shorter form its own usage line advertised, 2026-09-12](#a-flag-fixed-to-one-argv-position-broke-the-shorter-form-its-own-usage-line-advertised-2026-09-12)
 - [nan and inf pass "<= 0", and a three-file guard only ever had two files tested, 2026-09-12](#nan-and-inf-pass-0-and-a-three-file-guard-only-ever-had-two-files-tested-2026-09-12)
 - [RIFE blends across hard scene cuts, and this repo cannot verify a fix, 2026-09-12](#rife-blends-across-hard-scene-cuts-and-this-repo-cannot-verify-a-fix-2026-09-12)
+- [A merged stderr stream could silently corrupt the auto-selected interpolator, 2026-09-12](#a-merged-stderr-stream-could-silently-corrupt-the-auto-selected-interpolator-2026-09-12)
+- [A run that failed after grading could leave a fresh 14fps pair beside a stale K5, 2026-09-12](#a-run-that-failed-after-grading-could-leave-a-fresh-14fps-pair-beside-a-stale-k5-2026-09-12)
 
 **Grading**
 
@@ -1904,3 +1906,80 @@ what this suite can exercise without a CUDA torch and vendored weights.
 
 Documented the limitation in `rife.py`'s own usage text, next to the existing CFR
 requirement, rather than guessing at an unverifiable guard.
+
+## A merged stderr stream could silently corrupt the auto-selected interpolator, 2026-09-12
+
+**`finish.sh`'s `INTERP=auto` path parsed a line-oriented protocol out of a stream that had
+stderr merged into it.** `rife_try() { python "$HERE/rife.py" "$@" 2>&1; }` combines both
+streams, and `INTERP="$(printf '%s\n' "$RECO" | sed -n 1p)"` then reads line 1 of that
+combined output as the decision itself, unconditionally. `block_motion()` decodes through
+OpenCV's ffmpeg backend, which writes straight to the process's real stderr - bypassing
+Python entirely - and can do so at any point during the scan, i.e. before `recommend()`'s
+own `print(rec)` ever runs. A warning landing there becomes line 1, and `INTERP` becomes
+that warning's text instead of `"rife"` or `"minterpolate"`. Because the dispatch below is
+`if [ "$INTERP" = "rife" ]; then ... else` (minterpolate), a corrupted value can never
+accidentally equal `"rife"` - so this can only ever silently and invisibly pick
+minterpolate for footage that measured as needing rife, with no error at all. Confirmed by
+reading the call chain directly (`rife_try`'s merge, `block_motion`'s `cv2.VideoCapture`,
+and the unvalidated `sed -n 1p` assignment); no real OpenCV warning was reproducible on any
+codec/pixel-format combination tried in this environment (mjpeg, full-range yuvj420p), so
+the mechanism itself was proven by direct construction instead - see below.
+
+**Fixed by no longer merging stderr into the parsed value, and validating it regardless.**
+The `recommend` call site now captures stdout and stderr separately (stderr to a file, used
+only for diagnostics), so a decoder warning can no longer land inside the string that gets
+positionally parsed. `INTERP`'s parsed value is additionally checked against a `case
+rife|minterpolate) ;; *) ... esac`, falling back to minterpolate with a visible message for
+anything else - a safety net independent of the stderr-merge mechanism, covering any future
+bug in `recommendation()` itself. `rife_try` (still merged) is left alone at its other two
+call sites (`why`), which only ever use the result as opaque diagnostic text in an error
+message - not parsed positionally, so a merge there is harmless and still useful for
+surfacing a traceback on real failure.
+
+Mutation-tested twice, independently: a patched copy of `rife.py` that writes a
+recognisable line to stderr at the same point in `recommend` a real decoder warning would
+land (before the scan, matching the real ordering) proves the separation - reverting it
+makes the auto-selected value visibly become that injected text instead of `"rife"` on a
+fixture already confirmed to measure as rife. A separate patched copy where
+`recommendation()` always returns a third, bogus string (standing in for any future bug
+independent of stderr at all) proves the validation - reverting the `case` guard makes that
+value flow through unchecked. Both fixes together were also reverted as the single unit
+they landed in, confirming the full suite's other tests are unaffected either way.
+
+## A run that failed after grading could leave a fresh 14fps pair beside a stale K5, 2026-09-12
+
+**`finish.sh` published the 14fps pair into `OUT_DIR` immediately after grading, well
+before interpolation or the selective pass had even started.** A run that failed anywhere
+in `[4/5]` or `[5/5]` - a `why` probe that had passed but a model run that failed for any
+other reason `why` does not check (corrupted weights, an OOM, any other runtime CUDA
+error), or the injected failures used to test this directly - therefore always left
+`OUT_DIR` in a state where the fresh 14fps pair had already replaced the previous run's,
+while `${TAG}_lumafix_K5.mp4` was untouched from whatever run last produced it. On a re-run
+of an existing `TAG`, that is three files present, none missing, and no error visible in
+`OUT_DIR` itself - a mismatched deliverable set, built from two different runs, that looks
+exactly like a complete one. Reproduced directly: ran `finish.sh` to completion once,
+captured every deliverable's mtime, then re-ran the same `TAG` against a patched copy of
+the pipeline (`selective_interp.py` exits immediately, well after grading has already
+published under the old code) and confirmed the 14fps pair's mtimes had changed while K5's
+had not - the exact stale-mixed-output shape described above, produced mechanically rather
+than by guessing at the failure mode.
+
+**Fixed by staging every deliverable in the work directory and publishing all three
+together, only at the very end.** `graded.mp4` and `ungraded.mp4` stay in `$W` after the
+grade-verify step instead of moving into `OUT_DIR` immediately; every downstream reader
+that used to read the published copy (`recommend`, both interpolation branches,
+`selective_interp.py`) now reads the staged one instead; the 60fps deliverable is written
+to `$W/K5.mp4` rather than directly into `OUT_DIR`. All three `mv`s into `OUT_DIR` happen
+together, in one place, immediately before the `rm -rf "$W"` cleanup that already ran at
+the end - after every stage has succeeded. A failure anywhere above that point now leaves
+`OUT_DIR` exactly as it was before the run started; there is no longer a window in which
+only some of a run's deliverables have been published. This mirrors the ordering rule
+already applied at the top of this same script (`INTERP`/RIFE-availability validated
+before any expensive stage runs, not after) - here applied to the *publish* side of the
+same script rather than the *validate* side.
+
+Mutation-tested: reverting the staging (republishing the 14fps pair immediately after
+grading, writing K5 straight to `OUT_DIR`, and dropping the tail publish-together block)
+reproduces the exact failure the new test was built to catch - the 14fps pair's mtimes
+change on the failed re-run while K5's does not - and no other test in the suite is
+affected by the revert. Full suite (141) passes with the fix in place.

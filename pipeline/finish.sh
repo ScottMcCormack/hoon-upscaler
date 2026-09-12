@@ -217,16 +217,11 @@ ffmpeg -y -v error -r "$BASE_FPS" -f concat -safe 0 -i "$W/concat.txt" -i "$SRC_
 # A grade that pins pixels to a rail has deleted the differences between them, and
 # nothing downstream recovers that. This check is why the 51.8% clip could not ship
 # again unnoticed; it is objective, unlike anything about whether the grade looks good.
-# Both renders are still in the work directory. A rejected grade must not reach OUT_DIR:
-# set -e stops the pipeline either way, but writing the deliverable first means a refusal
-# leaves a destroyed file sitting where a deliverable belongs, having already overwritten
-# the previous good one. This project has shipped a plausible-looking bad file before -
-# a truncated render that only its duration gave away - so "it failed loudly" is not
-# enough on its own. Verify, then move.
+# Both renders stay in the work directory, verified but NOT yet published - see the
+# publish-together comment at the tail of this script for why, now that both the 14fps
+# pair and K5 are all staged and moved into OUT_DIR in one place, together.
 echo "### grade check"
 python "$HERE/grade.py" verify "$W/ungraded.mp4" "$W/graded.mp4"
-mv "$W/graded.mp4"   "$OUT_DIR/${TAG}_lumafix_14fps.mp4"
-mv "$W/ungraded.mp4" "$OUT_DIR/${TAG}_lumafix_14fps_ungraded.mp4"
 
 echo "### [4/5] 60fps interpolation"
 # minterpolate ends before its last input frame - it has nothing to interpolate into -
@@ -243,13 +238,37 @@ if [ "$INTERP" = "auto" ]; then
   # One call, not two. block_motion scans the whole clip through OpenCV by default (see
   # pipeline/rife.py), and asking separately for the recommendation and the number
   # measured the same clip twice for no reason.
-  RECO="$(rife_try recommend "$OUT_DIR/${TAG}_lumafix_14fps.mp4" --explain)" && RECO_RC=0 || RECO_RC=$?
+  # Not rife_try here, deliberately: that helper merges stderr into stdout (see its own
+  # comment above), which is fine for RIFE_WHY below - an opaque diagnostic string, used
+  # only for its content in an error message - but wrong here, where $RECO's FIRST LINE is
+  # parsed positionally as the decision itself. block_motion() decodes through OpenCV's
+  # ffmpeg backend, which can write straight to the process's real stderr - bypassing
+  # Python entirely - at any point during the scan, i.e. before recommend()'s own
+  # print(rec) ever runs. Merged, such a line becomes line 1 and gets assigned to INTERP
+  # verbatim; it can never equal "rife" by accident, so this can only silently and
+  # invisibly pick minterpolate for footage that measured as needing rife - never the
+  # reverse, and never with an error, which is what made it worth separating rather than
+  # noting as a would-be-obvious failure. Captured to a file instead of merged, and the
+  # parsed value is validated against the only two answers recommendation() can produce -
+  # so anything else, from any cause, is treated the same as a hard failure below rather
+  # than accepted as if it were one of them.
+  RECO_ERR="$W/reco_stderr.txt"
+  RECO="$(python "$HERE/rife.py" recommend "$W/graded.mp4" --explain \
+            2>"$RECO_ERR")" && RECO_RC=0 || RECO_RC=$?
   if [ "$RECO_RC" -ne 0 ]; then
-    echo "    !! could not measure motion to auto-select an interpolator: $RECO"
+    echo "    !! could not measure motion to auto-select an interpolator: $(cat "$RECO_ERR")$RECO"
     echo "       Falling back to minterpolate."
     INTERP=minterpolate
   else
     INTERP="$(printf '%s\n' "$RECO" | sed -n 1p)"
+    case "$INTERP" in
+      rife|minterpolate) ;;
+      *)
+        echo "    !! unexpected auto-selection output: '$INTERP' ($(cat "$RECO_ERR")$RECO)"
+        echo "       Falling back to minterpolate."
+        INTERP=minterpolate
+        ;;
+    esac
     echo "    auto -> $INTERP  ($(printf '%s\n' "$RECO" | sed -n 2p))"
     if [ "$INTERP" = "rife" ]; then
       # Probed once and remembered. Each probe spawns the venv interpreter and cold-imports
@@ -289,7 +308,7 @@ if [ "$INTERP" = "rife" ]; then
   # render's audio in here would stream-copy this whole (large, lossless) intermediate to
   # a second temp file purely to attach a track that gets discarded one step later.
   "$RIFE_PY" "$HERE/rife.py" interpolate \
-    "$OUT_DIR/${TAG}_lumafix_14fps.mp4" "$W/i60_raw.mp4" 60 1.0 --no-audio
+    "$W/graded.mp4" "$W/i60_raw.mp4" 60 1.0 --no-audio
   I60_SRC="$W/i60_raw.mp4"
   # fps=60 is now a no-op - RIFE emits at exactly 60 - and is kept as a belt-and-braces
   # assertion of the contract rather than as the fix it briefly was. If the interpolator
@@ -297,7 +316,7 @@ if [ "$INTERP" = "rife" ]; then
   # keep the cadence even; the schedule test is what protects the cadence.
   I60_FILTER="fps=60"
 else
-  I60_SRC="$OUT_DIR/${TAG}_lumafix_14fps.mp4"
+  I60_SRC="$W/graded.mp4"
   I60_FILTER="minterpolate=fps=60:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1:scd=none"
 fi
 # The tail fix, the trim target and the encode settings are shared between both
@@ -331,11 +350,24 @@ fi
 # the alternative is a visible cut. docs/findings.md carries the measurements; the call
 # is one for the eye. Pass 0 here to disable it.
 echo "### [5/5] selective pass (hold gaps >150ms, ease 3)"
-python "$HERE/selective_interp.py" "$W/i60.mp4" "$OUT_DIR/${TAG}_lumafix_14fps.mp4" \
+python "$HERE/selective_interp.py" "$W/i60.mp4" "$W/graded.mp4" \
   "$W/pts.txt" "$W/sel.mkv" 150 3 2>&1 | tail -2
 ffmpeg -y -v error -i "$W/sel.mkv" -i "$SRC_ORIG" -map 0:v:0 -map 1:a:0? \
   -c:v libx264 -preset medium -crf 18 -pix_fmt yuv420p -c:a aac -b:a 128k \
-  -movflags +faststart "$OUT_DIR/${TAG}_lumafix_K5.mp4"
+  -movflags +faststart "$W/K5.mp4"
+
+# Publish all three deliverables together, only now that every stage has succeeded - not
+# as each one became ready. A run that failed partway through interpolation or the
+# selective pass used to leave the FRESH 14fps pair (moved into OUT_DIR right after
+# grading) sitting next to a STALE K5 from a previous run of the same TAG: three files
+# present, none missing, and no error visible in OUT_DIR itself - a mismatched deliverable
+# set that looked exactly like a complete one. Staging all three in the work directory
+# until this point and moving them in one place removes the window where that could
+# happen; a failure anywhere above this line now leaves OUT_DIR exactly as it was before
+# this run started; either every deliverable it publishes is from this run, or none are.
+mv "$W/graded.mp4"          "$OUT_DIR/${TAG}_lumafix_14fps.mp4"
+mv "$W/ungraded.mp4"        "$OUT_DIR/${TAG}_lumafix_14fps_ungraded.mp4"
+mv "$W/K5.mp4"              "$OUT_DIR/${TAG}_lumafix_K5.mp4"
 
 rm -rf "$W"
 echo "### done $(date +%T)"

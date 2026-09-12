@@ -1279,6 +1279,131 @@ PY
              "deliverable produced but no fallback message: $(printf '%s' "$FOUT_LOG" | tail -1)" ;;
     esac
   fi
+
+  # finish.sh used to read $RECO with stderr MERGED into stdout (`rife_try`'s own 2>&1),
+  # then parse its first line positionally as the decision itself. block_motion() decodes
+  # through OpenCV's ffmpeg backend, which can write straight to the process's real
+  # stderr - bypassing Python entirely - before recommend()'s own print(rec) ever runs;
+  # merged, that line becomes line 1 and INTERP silently becomes the warning text instead
+  # of "rife" or "minterpolate" - which can never accidentally equal "rife", so this always
+  # and only mis-selected minterpolate for footage that measured as needing rife, with no
+  # error at all. Simulated the mechanism directly (a real OpenCV warning was not
+  # reproducible on any fixture tried in this environment) by patching a COPY of rife.py
+  # to write a recognisable line to stderr at the same point in `recommend` that a real
+  # decoder warning would land - before the scan that produces the real answer - and
+  # running the real finish.sh, with the fallback-fixture pan clip already proven above to
+  # measure as rife, end to end.
+  STDERRCOPY="$W/pipecopy_stderr"; rm -rf "$STDERRCOPY"; mkdir -p "$STDERRCOPY/pipeline"
+  cp "$REPO/pipeline/finish.sh" "$REPO/pipeline/luma_stabilise.py" \
+     "$REPO/pipeline/timing.py" "$REPO/pipeline/grade.py" "$REPO/pipeline/rife.py" \
+     "$REPO/pipeline/selective_interp.py" "$STDERRCOPY/pipeline/"
+  python - "$STDERRCOPY/pipeline/rife.py" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+old = '    elif cmd == "recommend":\n'
+new = ('    elif cmd == "recommend":\n'
+       '        print("SPURIOUS_DECODER_WARNING", file=sys.stderr)  # TEST INJECTION\n')
+assert s.count(old) == 1, f"anchor matched {s.count(old)} times"
+open(p, "w").write(s.replace(old, new))
+PY
+  clean_iout
+  SOUT="$(env INTERP=auto RIFE_HOME="$W/no_rife_here" bash "$STDERRCOPY/pipeline/finish.sh" \
+    "$PANRAW" I "$PANSRC" "$IOUT" 2>&1)"
+  case "$SOUT" in
+    *"auto -> rife"*"cannot run here"*)
+      ok "interp: a decoder warning on stderr does not corrupt the auto-selected value" ;;
+    *"SPURIOUS_DECODER_WARNING"*"auto ->"*)
+      bad "interp: a decoder warning on stderr does not corrupt the auto-selected value" \
+          "leaked into the parsed decision: $(printf '%s' "$SOUT" | grep -- 'auto ->' | head -1)" ;;
+    *) bad "interp: a decoder warning on stderr does not corrupt the auto-selected value" \
+           "never reached the rife branch: $(printf '%s' "$SOUT" | grep -- '-> ' | head -1)" ;;
+  esac
+
+  # A safety net independent of the fix above: whatever recommendation() returns, finish.sh
+  # must not assign it to INTERP unquestioned. Simulated by patching a COPY of rife.py so
+  # recommendation() always returns a value that is neither "rife" nor "minterpolate" -
+  # standing in for any future bug in that function, not just the stderr-merge mechanism
+  # above - and confirming finish.sh still produces a deliverable rather than silently
+  # running with a nonsense INTERP or crashing deeper in on an unrecognised value.
+  BOGUSCOPY="$W/pipecopy_bogus"; rm -rf "$BOGUSCOPY"; mkdir -p "$BOGUSCOPY/pipeline"
+  cp "$REPO/pipeline/finish.sh" "$REPO/pipeline/luma_stabilise.py" \
+     "$REPO/pipeline/timing.py" "$REPO/pipeline/grade.py" "$REPO/pipeline/rife.py" \
+     "$REPO/pipeline/selective_interp.py" "$BOGUSCOPY/pipeline/"
+  python - "$BOGUSCOPY/pipeline/rife.py" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+old = '    return "rife" if m > MOTION_THRESHOLD else "minterpolate"\n'
+new = '    return "bogus_value"  # TEST INJECTION: neither valid answer\n'
+assert s.count(old) == 1, f"anchor matched {s.count(old)} times"
+open(p, "w").write(s.replace(old, new))
+PY
+  clean_iout
+  BOUT="$(env INTERP=auto bash "$BOGUSCOPY/pipeline/finish.sh" "$RAW" I "$SRC" "$IOUT" 2>&1)"; BRC=$?
+  if [ "$BRC" -ne 0 ] || [ ! -f "$IOUT/I_lumafix_K5.mp4" ]; then
+    bad "interp: an unrecognised auto-selection value falls back, not aborts" \
+        "exit $BRC: $(printf '%s' "$BOUT" | tail -2 | head -1)"
+  else
+    case "$BOUT" in
+      *"unexpected auto-selection output"*"Falling back to minterpolate"*)
+        ok "interp: an unrecognised auto-selection value falls back, not aborts" ;;
+      *) bad "interp: an unrecognised auto-selection value falls back, not aborts" \
+             "deliverable produced but no fallback message: $(printf '%s' "$BOUT" | tail -1)" ;;
+    esac
+  fi
+
+  # A run that fails AFTER grading but BEFORE the 60fps stages used to have already moved
+  # the fresh 14fps pair into OUT_DIR (grading publishes as soon as it verifies, well
+  # before interpolation or the selective pass even start) - so a re-run of an existing TAG
+  # that failed partway left a fresh 14fps pair sitting next to a STALE K5 from the
+  # previous successful run: three files present, none missing, no error visible in
+  # OUT_DIR - a mismatched deliverable set that looked exactly like a complete one.
+  # Reproduced directly: run finish.sh to completion once, capture every deliverable's
+  # mtime, then force a failure in a patched COPY of the pipeline (selective_interp.py
+  # exits immediately, well after grading has published) and confirm every deliverable's
+  # mtime is unchanged - nothing was touched by the run that failed.
+  clean_iout
+  ATOM_OUT1="$(env INTERP=minterpolate bash "$REPO/pipeline/finish.sh" "$RAW" ATOM "$SRC" "$IOUT" 2>&1)"; ATOM_RC1=$?
+  if [ "$ATOM_RC1" -ne 0 ] || [ ! -f "$IOUT/ATOM_lumafix_K5.mp4" ]; then
+    bad "interp: a failed re-run does not touch any already-published deliverable" \
+        "first (successful) run failed: exit $ATOM_RC1: $(printf '%s' "$ATOM_OUT1" | tail -1)"
+  else
+    M14_BEFORE="$(stat -c %Y "$IOUT/ATOM_lumafix_14fps.mp4")"
+    MUN_BEFORE="$(stat -c %Y "$IOUT/ATOM_lumafix_14fps_ungraded.mp4")"
+    MK5_BEFORE="$(stat -c %Y "$IOUT/ATOM_lumafix_K5.mp4")"
+    sleep 1.1  # comfortably past filesystem mtime granularity
+
+    SELCOPY="$W/pipecopy_sel_fail"; rm -rf "$SELCOPY"; mkdir -p "$SELCOPY/pipeline"
+    cp "$REPO/pipeline/finish.sh" "$REPO/pipeline/luma_stabilise.py" \
+       "$REPO/pipeline/timing.py" "$REPO/pipeline/grade.py" "$REPO/pipeline/rife.py" \
+       "$REPO/pipeline/selective_interp.py" "$SELCOPY/pipeline/"
+    python - "$SELCOPY/pipeline/selective_interp.py" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+old = 'INTERP, SOURCE, PTSFILE, OUT = sys.argv[1:5]\n'
+new = old + 'sys.exit(1)  # TEST INJECTION: force the selective pass to fail\n'
+assert s.count(old) == 1, f"anchor matched {s.count(old)} times"
+open(p, "w").write(s.replace(old, new))
+PY
+    ATOM_OUT2="$(env INTERP=minterpolate bash "$SELCOPY/pipeline/finish.sh" "$RAW" ATOM "$SRC" "$IOUT" 2>&1)"; ATOM_RC2=$?
+    if [ "$ATOM_RC2" -eq 0 ]; then
+      bad "interp: a failed re-run does not touch any already-published deliverable" \
+          "the injected failure did not actually fail the run"
+    else
+      M14_AFTER="$(stat -c %Y "$IOUT/ATOM_lumafix_14fps.mp4")"
+      MUN_AFTER="$(stat -c %Y "$IOUT/ATOM_lumafix_14fps_ungraded.mp4")"
+      MK5_AFTER="$(stat -c %Y "$IOUT/ATOM_lumafix_K5.mp4")"
+      if [ "$M14_BEFORE" = "$M14_AFTER" ] && [ "$MUN_BEFORE" = "$MUN_AFTER" ] \
+         && [ "$MK5_BEFORE" = "$MK5_AFTER" ]; then
+        ok "interp: a failed re-run does not touch any already-published deliverable"
+      else
+        bad "interp: a failed re-run does not touch any already-published deliverable" \
+            "a deliverable's mtime changed despite the run failing (14fps $M14_BEFORE->$M14_AFTER, ungraded $MUN_BEFORE->$MUN_AFTER, K5 $MK5_BEFORE->$MK5_AFTER)"
+      fi
+    fi
+  fi
 fi
 
 # ---------------------------------------------------------------------------
